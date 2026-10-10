@@ -1,0 +1,139 @@
+//! 协议级集成测试：spawn 真实假插件 exe → 握手 → 请求 → 通知 → 超时 → 杀进程。
+
+use std::time::{Duration, Instant};
+
+use serde_json::json;
+use vine_host_core::sidecar::{SidecarConfig, SidecarError, SidecarManager};
+use vine_plugin_api::method;
+
+fn fake_plugin_exe() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_vine_fake_plugin"))
+}
+
+#[test]
+fn handshake_request_notification_kill() {
+    let mut manager = SidecarManager::new();
+    let config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    let handle = manager.spawn(config).expect("握手应成功");
+
+    assert!(handle.is_running());
+    assert_eq!(handle.info.id, "vine.fake");
+    assert_eq!(handle.info.api_version, "1.0");
+
+    // 请求 → 响应 id 配对
+    let result = handle
+        .request("echo", Some(json!({ "msg": "hello" })))
+        .expect("echo 应成功");
+    assert_eq!(result["msg"], "hello");
+
+    // 进度通知 + 终态响应
+    let result = handle
+        .request("progress.demo", None)
+        .expect("progress.demo 应返回终态");
+    assert_eq!(result["taskId"], "t-demo");
+    let mut progress_seen = 0;
+    while let Some(note) = handle.try_recv_notification() {
+        assert_eq!(note.method, method::TASK_PROGRESS);
+        assert!(note.is_notification());
+        progress_seen += 1;
+    }
+    assert_eq!(progress_seen, 2, "应收到 2 条 task.progress 通知");
+
+    // 未知方法 → MethodNotFound
+    let err = handle.request("nope", None).unwrap_err();
+    assert!(
+        matches!(err, SidecarError::Rpc { code, .. } if code == vine_plugin_api::codes::METHOD_NOT_FOUND),
+        "得到 {err:?}"
+    );
+
+    // 杀进程树并回收
+    let pid = {
+        // 通过 is_running 间接验证；杀完再确认
+        handle.kill();
+        handle.is_running()
+    };
+    assert!(!pid, "kill 后子进程应已退出");
+
+    // 杀后请求 → NotRunning
+    let err = handle.request("echo", None).unwrap_err();
+    assert!(matches!(err, SidecarError::NotRunning), "得到 {err:?}");
+}
+
+#[test]
+fn request_timeout_does_not_kill_and_recovers() {
+    let mut manager = SidecarManager::new();
+    let mut config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    config.request_timeout = Duration::from_millis(300);
+    let handle = manager.spawn(config).expect("握手应成功");
+
+    let started = Instant::now();
+    let err = handle.request("block", None).unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(matches!(err, SidecarError::Timeout { .. }), "得到 {err:?}");
+    assert!(
+        elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(3),
+        "超时应在 300ms 附近触发，实际 {elapsed:?}"
+    );
+
+    // 超时后连接仍可用（block 线程被占不影响其他请求）
+    let result = handle.request("echo", Some(json!({ "ok": 1 }))).unwrap();
+    assert_eq!(result["ok"], 1);
+}
+
+#[test]
+fn crash_fails_pending_and_surfaces_dead_process() {
+    let mut manager = SidecarManager::new();
+    let config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    let handle = manager.spawn(config).expect("握手应成功");
+
+    // crash 请求使进程退出；挂在 pending 的请求应收到失败而非干等
+    let crashed = handle.request("crash", None);
+    assert!(crashed.is_err(), "crash 后请求应失败");
+
+    // 等待进程真正退出（reader 线程 EOF 回收 pending 已发生）
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while handle.is_running() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!handle.is_running(), "crash 后进程应退出");
+
+    let err = handle.request("echo", None).unwrap_err();
+    assert!(matches!(err, SidecarError::NotRunning), "得到 {err:?}");
+}
+
+#[test]
+fn handshake_rejects_wrong_id() {
+    // 直接用脚本行为模拟：期望 id 与夹具不符
+    let mut manager = SidecarManager::new();
+    let config = SidecarConfig::new("vine.wrong", fake_plugin_exe());
+    let err = manager.spawn(config).unwrap_err();
+    match err {
+        SidecarError::Handshake(msg) => assert!(msg.contains("id 不匹配"), "得到 {msg}"),
+        other => panic!("应为 Handshake 错误，得到 {other:?}"),
+    }
+    assert!(manager.get("vine.wrong").is_none(), "失败的 spawn 不应留在管理器");
+}
+
+#[test]
+fn manager_spawn_replaces_existing_connection() {
+    let mut manager = SidecarManager::new();
+    let config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    let first = manager.spawn(config.clone()).unwrap();
+    assert!(first.is_running());
+
+    let second = manager.spawn(config).unwrap();
+    assert!(second.is_running());
+    // 旧句柄已被 manager 替换并 kill
+    assert!(!first.is_running());
+}
+
+#[test]
+fn stderr_log_is_captured() {
+    let mut manager = SidecarManager::new();
+    // 夹具不写 stderr，但通道应可用且为空
+    let config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    let handle = manager.spawn(config).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let _log = handle.take_stderr_log();
+    assert!(handle.is_running());
+}

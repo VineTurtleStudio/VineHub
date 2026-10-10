@@ -224,6 +224,12 @@ pub fn parse_response_line(line: &str) -> Result<RpcResponse, RpcMessageError> {
             "result 与 error 不得同时出现",
         ));
     }
+    // 纯通知行（无 id 且无 result/error）不是响应
+    if resp.id.is_none() && resp.result.is_none() && resp.error.is_none() {
+        return Err(RpcMessageError::invalid_request(
+            "缺少 id 与 result/error，不是响应消息",
+        ));
+    }
     Ok(resp)
 }
 
@@ -330,6 +336,15 @@ mod tests {
                 .code,
             codes::INVALID_REQUEST
         );
+    }
+
+    #[test]
+    fn notification_line_is_not_a_response() {
+        let note = r#"{"jsonrpc":"2.0","method":"task.progress","params":{"taskId":"t"}}"#;
+        let err = parse_response_line(note).unwrap_err();
+        assert_eq!(err.code, codes::INVALID_REQUEST);
+        // 但可以按请求/通知解析
+        assert!(parse_request_line(note).unwrap().is_notification());
     }
 
     #[test]

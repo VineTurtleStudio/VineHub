@@ -15,8 +15,9 @@ pub use manifest::{
     CommandSpec, FsMode, ManifestError, PanelSpec, Permissions, PluginKind, PluginManifest,
 };
 pub use rpc::{
-    method, parse_request_line, parse_response_line, to_line, PluginInfo, RpcError, RpcMessageError,
-    RpcRequest, RpcResponse, ScanStartParams, ScanStartResult, TaskCancelParams, TaskProgressParams,
+    method, parse_request_line, parse_response_line, to_line, PluginInfo, RequestId, RpcError,
+    RpcMessageError, RpcRequest, RpcResponse, ScanStartParams, ScanStartResult, TaskCancelParams,
+    TaskProgressParams,
 };
 pub use version::{ApiVersion, VersionError};
 
