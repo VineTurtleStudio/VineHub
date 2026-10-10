@@ -1,0 +1,16 @@
+[package]
+name = "vine-host-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VineHub 宿主核心：插件注册表 / 子进程生命周期 / 权限闸门 / 配置存储"
+
+[dependencies]
+vine-plugin-api = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

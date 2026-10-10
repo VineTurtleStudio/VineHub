@@ -1,0 +1,19 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node / 前端
+node_modules/
+dist/
+dist-portable/
+*.local
+
+# Tauri 生成物
+**/src-tauri/gen/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 测试临时数据
+.testdata
