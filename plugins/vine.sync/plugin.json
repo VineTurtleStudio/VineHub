@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "vine.sync",
+  "name": "vineSync",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "kind": "external",
+  "entry": "D:\\VineTurtleStudio\\Projects\\vineSync\\src-tauri\\target\\release\\vinesync.exe",
+  "panels": [],
+  "commands": [],
+  "permissions": {
+    "fs.read": ["all-selected"],
+    "fs.write": ["all-selected"],
+    "net": false,
+    "exec": false
+  },
+  "dataDir": "vine.sync",
+  "minHubVersion": "0.1.0"
+}

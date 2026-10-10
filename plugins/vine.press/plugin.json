@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "vine.press",
+  "name": "vinePress",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "kind": "external",
+  "entry": "D:\\VineTurtleStudio\\Projects\\vinePress\\src-tauri\\target\\debug\\vine-press.exe",
+  "panels": [],
+  "commands": [],
+  "permissions": {
+    "fs.read": ["user-picked"],
+    "fs.write": ["user-picked"],
+    "net": false,
+    "exec": false
+  },
+  "dataDir": "vine.press",
+  "minHubVersion": "0.1.0"
+}

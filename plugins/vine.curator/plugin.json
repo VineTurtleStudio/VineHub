@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "vine.curator",
+  "name": "vineCurator",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "kind": "external",
+  "entry": "D:\\VineTurtleStudio\\Projects\\vineCurator\\src-tauri\\target\\debug\\vine-curator.exe",
+  "panels": [],
+  "commands": [],
+  "permissions": {
+    "fs.read": ["user-picked", "all-selected"],
+    "fs.write": ["user-picked"],
+    "net": false,
+    "exec": false
+  },
+  "dataDir": "vine.curator",
+  "minHubVersion": "0.1.0"
+}

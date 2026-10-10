@@ -1,0 +1,22 @@
+[package]
+name = "vine-hub"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "VineHub 宿主：VineTurtleStudio 文件类工具的统一主面板"
+
+[lib]
+name = "vine_hub_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { workspace = true }
+tauri-plugin-dialog = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+vine-plugin-api = { workspace = true }
+vine-host-core = { workspace = true }
+zip = { workspace = true }

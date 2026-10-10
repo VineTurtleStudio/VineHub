@@ -106,7 +106,8 @@ pub struct SidecarHandle {
     pending: PendingMap,
     next_id: AtomicI64,
     /// 插件发来的通知/请求（如 `task.progress`）。
-    notifications: Receiver<RpcRequest>,
+    /// 包一层 Mutex：mpsc::Receiver 是 Send 但非 Sync，需满足 AppState 的 Send+Sync。
+    notifications: Mutex<Receiver<RpcRequest>>,
     stderr_log: Arc<Mutex<Vec<String>>>,
     request_timeout: Duration,
     /// 握手返回的信息。
@@ -133,7 +134,7 @@ impl SidecarHandle {
 
     /// 取一条插件通知（非阻塞）。
     pub fn try_recv_notification(&self) -> Option<RpcRequest> {
-        self.notifications.try_recv().ok()
+        self.notifications.lock().unwrap().try_recv().ok()
     }
 
     /// 发送请求并按 id 配对等待终态响应；超时返回 [`SidecarError::Timeout`]。
@@ -291,7 +292,7 @@ impl SidecarManager {
             stdin,
             pending,
             next_id,
-            notifications: notif_rx,
+            notifications: Mutex::new(notif_rx),
             stderr_log,
             request_timeout: config.request_timeout,
             info,

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "vine.pulse",
+  "name": "vinePulse",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "kind": "external",
+  "entry": "D:\\VineTurtleStudio\\Projects\\vinePulse\\target\\release\\vine-pulse.exe",
+  "panels": [],
+  "commands": [],
+  "permissions": {
+    "fs.read": ["user-picked"],
+    "fs.write": [],
+    "net": false,
+    "exec": false
+  },
+  "dataDir": "vine.pulse",
+  "minHubVersion": "0.1.0"
+}
