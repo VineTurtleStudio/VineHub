@@ -2,8 +2,10 @@
 
 pub mod registry;
 pub mod sidecar;
+pub mod storage;
 
 pub use registry::{PluginEntry, PluginRegistry, PluginStatus, RegistryError, ScanSummary};
 pub use sidecar::{SidecarConfig, SidecarError, SidecarHandle, SidecarManager};
+pub use storage::{PluginRecord, Store, StorageError, TaskRecord, TaskStatus};
 
 pub const HOST_APP_NAME: &str = "VineHub";
