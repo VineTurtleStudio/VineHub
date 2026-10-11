@@ -5588,6 +5588,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "trash",
+ "vine-plugin-api",
  "zip 8.6.0",
 ]
 

@@ -17,6 +17,12 @@ pub mod method {
     pub const PING: &str = "ping";
     /// vinePulse 扫描启动。
     pub const SCAN_START: &str = "scan.start";
+    /// vinePress 试算分类（不落盘）。
+    pub const PLAN_START: &str = "plan.start";
+    /// vinePress 查找重复文件。
+    pub const DUPES_FIND: &str = "dupes.find";
+    /// vinePress 执行导出（试算结果 → 压缩包）。
+    pub const EXPORT_START: &str = "export.start";
     /// 取消任务（通知）。
     pub const TASK_CANCEL: &str = "task.cancel";
     /// 进度通知。

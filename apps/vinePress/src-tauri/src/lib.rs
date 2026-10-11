@@ -10,6 +10,7 @@ pub mod meta;
 pub mod naming;
 pub mod notes;
 pub mod project;
+pub mod rpc;
 pub mod scan;
 
 pub fn run() {

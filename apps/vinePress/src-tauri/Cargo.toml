@@ -16,6 +16,7 @@ zip = { version = "8.6.0", features = ["deflate"] }
 trash = "5.2.9"
 sha2 = "0.10"
 base64 = "0.22"
+vine-plugin-api = { workspace = true }
 
 [lib]
 name = "vine_press_lib"
