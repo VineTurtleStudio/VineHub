@@ -3,6 +3,7 @@ mod core;
 mod msg;
 mod model;
 mod runtime;
+pub mod rpc;
 mod storage;
 mod trigger;
 

@@ -428,7 +428,7 @@ fn sync_pair(
     let mut bytes_done: u64 = 0;
     let paused = app.state::<AppCtx>().syncer.paused.clone();
     let (applied, errs) =
-        apply_changes(pair, config, &d.changes, threads, &paused, |done, ch| {
+            apply_changes(pair, config, &d.changes, threads, &paused, &AtomicBool::new(false), |done, ch| {
         if matches!(ch.kind, ChangeKind::Add | ChangeKind::Update) {
             bytes_done += ch.size;
         }
@@ -489,7 +489,7 @@ fn sync_pair(
     Ok(PairOutcome { counts, errors })
 }
 
-fn compute_changes(
+pub(crate) fn compute_changes(
     app: Option<&tauri::AppHandle>,
     pair: &PairConfig,
     config: &Config,
@@ -597,7 +597,7 @@ fn emit_scan(app: Option<&tauri::AppHandle>, pair: &PairConfig, phase: &str, fil
 }
 
 /// (源清单, 目标清单(已剔除源端不可见路径), 差异, 扫描跳过的不可访问路径数)
-type DiffResult3 = (
+pub(crate) type DiffResult3 = (
     BTreeMap<String, FileMeta>,
     BTreeMap<String, FileMeta>,
     DiffResult,
@@ -739,12 +739,13 @@ fn wait_while_paused(paused: &AtomicBool) {
 /// 每个文件失败自动重试；`paused` 置位时在文件粒度等待恢复；
 /// `on_progress(done, ch)` 在调用线程按完成顺序回调。
 /// 各变更互不依赖（每条对应不同相对路径），并行是安全的。
-fn apply_changes(
+pub(crate) fn apply_changes(
     pair: &PairConfig,
     config: &Config,
     changes: &[Change],
     threads: usize,
     paused: &AtomicBool,
+    cancel: &AtomicBool,
     mut on_progress: impl FnMut(usize, &Change),
 ) -> (Counts, Vec<String>) {
     let mut counts = Counts::default();
@@ -752,6 +753,9 @@ fn apply_changes(
 
     if threads <= 1 || changes.len() < threads * 2 {
         for (i, ch) in changes.iter().enumerate() {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
             wait_while_paused(paused);
             match apply_change_retry(pair, ch, config) {
                 Ok(()) => bump_kind(&mut counts, ch.kind),
@@ -773,8 +777,12 @@ fn apply_changes(
             let tx = tx.clone();
             let queue = &queue;
             let paused = paused;
+            let cancel = cancel;
             s.spawn(move || {
                 loop {
+                    if cancel.load(Ordering::SeqCst) {
+                        break;
+                    }
                     let idx = {
                         let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
                         q.pop_front()
@@ -953,6 +961,7 @@ mod tests {
             &changes,
             4,
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
             |done, _| {
                 progress.push(done);
             },
@@ -992,6 +1001,7 @@ mod tests {
             &changes,
             2,
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
             |done, _| {
                 last_done = done;
             },
@@ -1021,7 +1031,7 @@ mod tests {
         });
         let start = Instant::now();
         let (counts, errors) =
-            apply_changes(&pair, &Config::default(), &changes, 1, &paused, |_, _| {});
+            apply_changes(&pair, &Config::default(), &changes, 1, &paused, &AtomicBool::new(false), |_, _| {});
         h.join().unwrap();
 
         assert!(errors.is_empty(), "errors: {errors:?}");

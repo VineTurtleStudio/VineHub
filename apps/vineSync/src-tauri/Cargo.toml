@@ -29,6 +29,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 log = "0.4"
 thiserror = "2"
+vine-plugin-api = { workspace = true }
 
 [profile.release]
 codegen-units = 1

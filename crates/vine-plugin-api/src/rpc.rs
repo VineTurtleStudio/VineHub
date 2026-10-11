@@ -23,6 +23,10 @@ pub mod method {
     pub const DUPES_FIND: &str = "dupes.find";
     /// vinePress 执行导出（试算结果 → 压缩包）。
     pub const EXPORT_START: &str = "export.start";
+    /// vineSync 试算同步差异（不落盘）。
+    pub const SYNC_PREVIEW: &str = "sync.preview";
+    /// vineSync 执行同步。
+    pub const SYNC_START: &str = "sync.start";
     /// 取消任务（通知）。
     pub const TASK_CANCEL: &str = "task.cancel";
     /// 进度通知。
