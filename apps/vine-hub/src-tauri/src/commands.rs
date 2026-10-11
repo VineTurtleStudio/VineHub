@@ -842,6 +842,34 @@ pub fn task_start(
     start_task_impl(&state, &plugin_id, &method, params, None)
 }
 
+/// 桥接 rpc.request：阻塞式代理单响应 RPC 到本插件 sidecar（自动拉起）。
+#[tauri::command]
+pub fn rpc_proxy(
+    plugin_id: String,
+    method: String,
+    params: Option<Value>,
+    state: State<'_, crate::AppState>,
+) -> Result<Value, String> {
+    let handle = ensure_sidecar(&state, &plugin_id)?;
+    handle
+        .request(&method, params)
+        .map_err(|e| format!("sidecar 请求失败: {e}"))
+}
+
+/// 桥接 rpc.notify：通知类代理，不等待响应。
+#[tauri::command]
+pub fn rpc_notify(
+    plugin_id: String,
+    method: String,
+    params: Option<Value>,
+    state: State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let handle = ensure_sidecar(&state, &plugin_id)?;
+    handle
+        .notify(&method, params)
+        .map_err(|e| format!("sidecar 通知失败: {e}"))
+}
+
 fn cfg_key(plugin_id: &str, key: &str) -> String {
     format!("plugin.{plugin_id}.cfg.{key}")
 }

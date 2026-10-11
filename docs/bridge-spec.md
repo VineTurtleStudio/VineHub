@@ -38,6 +38,8 @@
 | `config.get` | `{ key: string }` | `{ value: string \| null }` | 插件命名空间配置读取（`plugin.{pluginId}.cfg.{key}`） |
 | `config.set` | `{ key: string, value: string }` | `{ ok: true }` | 插件命名空间配置写入 |
 | `task.start` | `{ pluginId: string, method: string, params: object }` | `{ taskId: string }` | 以任意 RPC 方法启动任务（ack+终态）；`pluginId` 必须等于宿主分配给该面板的插件 id |
+| `rpc.request` | `{ method: string, params?: object }` | sidecar 响应 `result` | **阻塞式代理**到本面板插件的 sidecar（单响应 RPC，如 `plugin.info`/`library.roots`/`search.items`）；宿主自动拉起 sidecar |
+| `rpc.notify` | `{ method: string, params?: object }` | `{ ok: true }` | 通知类代理（如 `task.cancel` 原生通知）；不等待响应 |
 | `task.list` | `{ pluginId?: string }` | `{ tasks: TaskView[] }` | 任务列表（含进度/终态对账） |
 | `task.cancel` | `{ taskId: string }` | `{ ok: true }` | 按宿主记录 id 取消 |
 | `task.retry` | `{ taskId: string }` | `{ taskId: string }` | 用参数快照重启，返回新记录 id |
@@ -63,8 +65,19 @@
 
 每个插件前端提供 `src/host-bridge.ts`：
 
-- 检测 `window.parent !== window` **且** `window.__VINEHUB_HOST__ === true`（宿主在 iframe 加载前注入）→ postMessage 模式；
-- 否则 → 原生 `invoke`（Tauri）模式，行为与独立运行完全一致。
+- **宿主模式判定**：`window.parent !== window` **且** URL 查询参数 `vinehub=1`
+  （宿主在拼接 iframe src 时追加；查询参数在页面脚本执行前即存在，无注入时序竞态）。
+- 宿主模式 → `postMessage` 桥接（`rpc.request`/`rpc.notify` 走本插件 sidecar）；
+- 独立运行 → 原生 `invoke`，行为与改造前完全一致。
+
+推荐收敛形态（各 app `api.ts` 逐函数改造，其余调用方不改）：
+
+```ts
+// host-bridge.ts 提供
+hubInvoke<T>(rpcMethod: string | null, invokeName: string, args: Record<string, unknown>): Promise<T>
+// 独立：invoke(invokeName, args)；hub：rpc.request { method: rpcMethod, params: args }
+// rpcMethod 为 null 的命令仅独立可用（如宿主专属的 UI 操作）。
+```
 
 所有 Tauri 调用收敛在各插件 `src/api.ts`，适配层只改这一处。
 

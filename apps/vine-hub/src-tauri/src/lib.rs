@@ -102,6 +102,8 @@ pub fn run() {
             commands::task_cancel_id,
             commands::task_retry,
             commands::task_start,
+            commands::rpc_proxy,
+            commands::rpc_notify,
             commands::resolve_panel_ui,
             commands::config_get,
             commands::config_set,

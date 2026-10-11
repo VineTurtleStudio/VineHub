@@ -8,9 +8,11 @@
   "entry": "../../target/debug/vine-curator.exe",
   "panels": [ { "id": "main", "title": "资料库", "ui": "dist/index.html", "icon": "curator" } ],
   "commands": [],
-  "permissions": {
-    "fs.read": ["user-picked", "all-selected"],
-    "fs.write": ["app-data"],
-    "network": []
-  }
-}
+    "permissions": {
+    "fs.read": ["user-picked"],
+    "fs.write": ["user-picked"],
+    "net": false,
+    "exec": false
+  },
+  "dataDir": "data",
+  "minHubVersion": "0.1.0"}

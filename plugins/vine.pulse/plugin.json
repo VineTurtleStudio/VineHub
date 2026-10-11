@@ -10,9 +10,11 @@
     { "id": "scan", "title": "损坏检测", "ui": "dist/index.html", "icon": "pulse" }
   ],
   "commands": [],
-  "permissions": {
+    "permissions": {
     "fs.read": ["user-picked"],
-    "fs.write": ["temp"],
-    "network": []
-  }
-}
+    "fs.write": ["user-picked"],
+    "net": false,
+    "exec": false
+  },
+  "dataDir": "data",
+  "minHubVersion": "0.1.0"}

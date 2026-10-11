@@ -109,3 +109,19 @@ export function configSet(pluginId: string, key: string, value: string): Promise
 export function hostLog(pluginId: string, level: string, message: string): Promise<void> {
   return invoke<void>("host_log", { pluginId, level, message });
 }
+
+export function rpcProxy(
+  pluginId: string,
+  method: string,
+  params: Record<string, unknown> | null,
+): Promise<unknown> {
+  return invoke<unknown>("rpc_proxy", { pluginId, method, params });
+}
+
+export function rpcNotify(
+  pluginId: string,
+  method: string,
+  params: Record<string, unknown> | null,
+): Promise<void> {
+  return invoke<void>("rpc_notify", { pluginId, method, params });
+}

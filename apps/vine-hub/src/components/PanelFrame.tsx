@@ -6,6 +6,8 @@ import {
   configSet,
   hostLog,
   resolvePanelUi,
+  rpcNotify,
+  rpcProxy,
   taskCancelId,
   taskList,
   taskRetry,
@@ -21,6 +23,8 @@ const WHITELIST = new Set([
   "fs.pick",
   "config.get",
   "config.set",
+  "rpc.request",
+  "rpc.notify",
   "task.start",
   "task.list",
   "task.cancel",
@@ -64,7 +68,8 @@ export function PanelFrame({ pluginId, panel, onNotify }: Props) {
           setLoading(false);
           return;
         }
-        setSrc(convertFileSrc(path));
+        // vinehub=1：宿主模式标记（查询参数在脚本执行前即存在）
+        setSrc(convertFileSrc(path) + (path.includes("?") ? "&" : "?") + "vinehub=1");
       } catch (e) {
         if (!alive) return;
         setLoadError(String(e));
@@ -99,6 +104,25 @@ export function PanelFrame({ pluginId, panel, onNotify }: Props) {
           const key = String(params.key ?? "");
           if (!key) throw bridgeError(-32602, "缺少 key");
           await configSet(pluginId, key, String(params.value ?? ""));
+          return { ok: true };
+        }
+        case "rpc.request": {
+          const rpcMethod = String(params.method ?? "");
+          if (!rpcMethod) throw bridgeError(-32602, "缺少 method");
+          return await rpcProxy(
+            pluginId,
+            rpcMethod,
+            (params.params as Record<string, unknown>) ?? null,
+          );
+        }
+        case "rpc.notify": {
+          const rpcMethod = String(params.method ?? "");
+          if (!rpcMethod) throw bridgeError(-32602, "缺少 method");
+          await rpcNotify(
+            pluginId,
+            rpcMethod,
+            (params.params as Record<string, unknown>) ?? null,
+          );
           return { ok: true };
         }
         case "task.start": {

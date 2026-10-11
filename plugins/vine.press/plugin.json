@@ -8,9 +8,11 @@
   "entry": "../../target/debug/vine-press.exe",
   "panels": [ { "id": "main", "title": "整理", "ui": "dist/index.html", "icon": "press" } ],
   "commands": [],
-  "permissions": {
+    "permissions": {
     "fs.read": ["user-picked"],
     "fs.write": ["user-picked"],
-    "network": []
-  }
-}
+    "net": false,
+    "exec": false
+  },
+  "dataDir": "data",
+  "minHubVersion": "0.1.0"}
