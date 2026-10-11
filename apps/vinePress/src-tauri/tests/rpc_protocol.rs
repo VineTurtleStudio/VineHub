@@ -134,6 +134,8 @@ fn handshake_reports_id_and_capabilities() {
         .collect();
     assert!(caps.contains(&"plan".to_string()));
     assert!(caps.contains(&"export".to_string()));
+    assert!(caps.contains(&"scan".to_string()));
+    assert!(caps.contains(&"project".to_string()));
 }
 
 #[test]
@@ -301,4 +303,132 @@ fn invalid_params_and_unknown_method() {
         .recv_response_for(12, Duration::from_secs(5))
         .expect("应有错误响应");
     assert_eq!(resp["error"]["code"], -32602);
+}
+
+// ==================== P3.3 GUI 面覆盖 ====================
+
+#[test]
+fn gui_fast_methods_roundtrip() {
+    let root = temp_dir("gui-fast");
+
+    let mut client = Client::spawn();
+
+    // tools.probe
+    client.request(20, "tools.probe", None);
+    let resp = client
+        .recv_response_for(20, Duration::from_secs(5))
+        .expect("tools.probe 应有响应");
+    assert!(resp["result"].get("rar").is_some(), "得到 {resp}");
+
+    // names.profiles
+    client.request(21, "names.profiles", None);
+    let resp = client
+        .recv_response_for(21, Duration::from_secs(5))
+        .expect("names.profiles 应有响应");
+    assert!(
+        resp["result"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        "应返回 ≥1 个命名方案，得到 {resp}"
+    );
+
+    // fs.mkdir → fs.list（path 与 GUI 一致：绝对路径）
+    client.request(
+        22,
+        "fs.mkdir",
+        Some(serde_json::json!({
+            "root": root.display().to_string(),
+            "path": root.join("subdir").display().to_string()
+        })),
+    );
+    let resp = client
+        .recv_response_for(22, Duration::from_secs(5))
+        .expect("fs.mkdir 应有响应");
+    assert_eq!(resp["result"]["ok"], true, "得到 {resp}");
+
+    client.request(
+        23,
+        "fs.list",
+        Some(serde_json::json!({
+            "root": root.display().to_string(),
+            "path": root.display().to_string()
+        })),
+    );
+    let resp = client
+        .recv_response_for(23, Duration::from_secs(5))
+        .expect("fs.list 应有响应");
+    let items = resp["result"].as_array().expect("list 应返回数组");
+    assert!(
+        items.iter().any(|i| i["name"] == "subdir"),
+        "list 应含 subdir，得到 {resp}"
+    );
+
+    // project.save → project.load 往返
+    let proj_path = root.join("test-project.json");
+    let project = serde_json::json!({
+        "version": 1,
+        "name": "rpc-roundtrip",
+        "root": root.display().to_string(),
+        "output_root": root.display().to_string(),
+        "password_profiles": [],
+        "archive": {
+            "format": "zip",
+            "volume_mib": 0,
+            "comment": true,
+            "encrypt_names": false,
+            "overwrite": false,
+            "write_notes": true,
+            "incremental": false
+        },
+        "overrides": { "force_units": [], "force_containers": [] },
+        "entries": []
+    });
+    client.request(
+        24,
+        "project.save",
+        Some(serde_json::json!({
+            "path": proj_path.display().to_string(),
+            "project": project
+        })),
+    );
+    let resp = client
+        .recv_response_for(24, Duration::from_secs(5))
+        .expect("project.save 应有响应");
+    assert_eq!(resp["result"]["ok"], true, "得到 {resp}");
+
+    client.request(
+        25,
+        "project.load",
+        Some(serde_json::json!({ "path": proj_path.display().to_string() })),
+    );
+    let resp = client
+        .recv_response_for(25, Duration::from_secs(5))
+        .expect("project.load 应有响应");
+    assert_eq!(resp["result"]["name"], "rpc-roundtrip", "得到 {resp}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn scan_directory_returns_full_entries() {
+    let root = temp_dir("scan-dir");
+    make_unit(&root, "AlbumX");
+    make_unit(&root, "NovelY");
+
+    let mut client = Client::spawn();
+    client.request(
+        30,
+        "scan.directory",
+        Some(serde_json::json!({ "root": root.display().to_string() })),
+    );
+
+    // 阻塞单响应（对齐 GUI invoke 语义）：直接带完整 ScanResponse
+    let resp = client
+        .recv_response_for(30, Duration::from_secs(20))
+        .expect("scan.directory 应有响应");
+    let result = &resp["result"];
+    let entries = result["entries"].as_array().expect("entries 数组");
+    assert!(entries.len() >= 2, "应识别 ≥2 单位，得到 {}", entries.len());
+    assert!(result["tree"].is_array(), "应含 tree");
+    assert!(entries.iter().any(|e| e["rel_path"] == "AlbumX"), "得到 {result}");
+
+    let _ = std::fs::remove_dir_all(&root);
 }

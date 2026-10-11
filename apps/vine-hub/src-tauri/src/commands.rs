@@ -387,7 +387,8 @@ fn ensure_sidecar(state: &crate::AppState, plugin_id: &str) -> Result<Arc<Sideca
     config.args = vec!["--rpc".to_string()];
     config.expected_api_version = api_version;
     config.handshake_timeout = Duration::from_secs(5);
-    config.request_timeout = Duration::from_secs(30);
+    // 长操作（如 scan.directory 全量扫描）可达数分钟；rpc_proxy 阻塞等待上限放宽
+    config.request_timeout = Duration::from_secs(15 * 60);
     config.log_dir = Some(state.logs_dir.clone());
     sidecars.spawn(config).map_err(|e| format!("拉起 sidecar 失败: {e}"))
 }
@@ -530,6 +531,8 @@ pub struct TaskView {
     pub progress: Option<Value>,
     /// 插件内部 taskId。
     pub plugin_task_id: Option<String>,
+    /// 完整终态载荷（仅存活期内可见，不落盘）。
+    pub terminal: Option<Value>,
 }
 
 /// 任务列表（含终态对账：内存终态→DB；宿主重启后的悬挂 running→failed）。
@@ -548,10 +551,12 @@ pub fn task_list(
     let mut tasks = state.tasks.lock().unwrap();
     let mut views = Vec::with_capacity(records.len());
     for mut rec in records {
+        let mut live_terminal: Option<Value> = None;
         if rec.status == vine_host_core::TaskStatus::Running {
             if let Some(slot) = tasks.get(&rec.plugin_id) {
                 let (status, summary) = derive_status(slot);
                 if status != vine_host_core::TaskStatus::Running {
+                    live_terminal = slot.terminal.lock().unwrap().as_ref().and_then(|t| t.as_ref().ok().cloned());
                     let detail = json!({ "summary": summary }).to_string();
                     {
                         let store = state.store.lock().unwrap();
@@ -597,6 +602,7 @@ pub fn task_list(
             detail: rec.detail,
             progress,
             plugin_task_id,
+            terminal: live_terminal,
         });
     }
     Ok(views)

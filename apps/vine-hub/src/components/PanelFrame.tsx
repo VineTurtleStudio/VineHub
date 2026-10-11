@@ -68,8 +68,13 @@ export function PanelFrame({ pluginId, panel, onNotify }: Props) {
           setLoading(false);
           return;
         }
-        // vinehub=1：宿主模式标记（查询参数在脚本执行前即存在）
-        setSrc(convertFileSrc(path) + (path.includes("?") ? "&" : "?") + "vinehub=1");
+        // vinehub=1 + pluginId：宿主模式标记（查询参数在脚本执行前即存在）
+        const sep = path.includes("?") ? "&" : "?";
+        setSrc(
+          convertFileSrc(path) +
+            sep +
+            `vinehub=1&pluginId=${encodeURIComponent(pluginId)}`,
+        );
       } catch (e) {
         if (!alive) return;
         setLoadError(String(e));

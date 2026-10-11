@@ -19,7 +19,7 @@ interface PendingEntry {
   timer: number;
 }
 
-const pending = new Map<number, PendingEntry>();
+const pending = new Map<number | string, PendingEntry>();
 let seq = 0;
 const BRIDGE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -32,6 +32,15 @@ export function isHubEmbedded(): boolean {
     );
   } catch {
     return false;
+  }
+}
+
+/** 宿主分配的插件 id（iframe src 查询参数 `pluginId`）。 */
+export function hubPluginId(): string | null {
+  try {
+    return new URLSearchParams(window.location.search).get("pluginId");
+  } catch {
+    return null;
   }
 }
 
@@ -124,4 +133,61 @@ export async function hostLogLine(
 ): Promise<void> {
   if (!isHubEmbedded()) return;
   await bridgeRequest("log", { level, message });
+}
+
+/**
+ * 宿主任务式调用：`task.start` 启动 → 轮询 `task.list` 至终态 → 返回完整终态载荷。
+ * 独立模式抛错（任务式命令在独立模式走原生 invoke + 事件，不经本函数）。
+ * 插件 id 取自 iframe src 查询参数。
+ */
+export async function hubTaskRequest<T = unknown>(
+  rpcMethod: string,
+  params: Record<string, unknown>,
+  onProgress?: (done: number, total: number, msg: string | null) => void,
+): Promise<T> {
+  if (!isHubEmbedded()) {
+    throw new Error("hubTaskRequest 仅可在宿主模式下调用");
+  }
+  const pluginId = hubPluginId();
+  if (!pluginId) {
+    throw new Error("iframe src 缺少 pluginId 查询参数");
+  }
+  const { taskId } = await bridgeRequest<{ taskId: string }>("task.start", {
+    pluginId,
+    method: rpcMethod,
+    params,
+  });
+  const deadline = Date.now() + 30 * 60 * 1000;
+  let lastDone = -1;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 400));
+    const { tasks } = await bridgeRequest<{
+      tasks: {
+        id: string;
+        status: string;
+        detail: string | null;
+        progress: { done: number; total: number; msg?: string | null } | null;
+        terminal: unknown | null;
+      }[];
+    }>("task.list", { pluginId });
+    const t = tasks.find((x) => x.id === taskId);
+    if (!t) continue;
+    if (t.progress && t.progress.done !== lastDone) {
+      lastDone = t.progress.done;
+      onProgress?.(t.progress.done, t.progress.total, t.progress.msg ?? null);
+    }
+    if (t.status === "running") continue;
+    if (t.terminal && typeof t.terminal === "object" && !("error" in (t.terminal as object))) {
+      return t.terminal as T;
+    }
+    let msg = t.detail ?? "任务失败";
+    try {
+      const parsed = JSON.parse(t.detail ?? "{}") as { summary?: string };
+      if (parsed.summary) msg = parsed.summary;
+    } catch {
+      /* keep */
+    }
+    throw new Error(msg);
+  }
+  throw new Error("任务等待超时");
 }

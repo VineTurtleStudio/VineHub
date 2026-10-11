@@ -37,6 +37,23 @@ pub mod method {
     pub const SEARCH_ITEMS: &str = "search.items";
     /// VinePalmaCursor 格式转换（图片/cur/ani → cur 或 ani）。
     pub const FILE_CONVERT: &str = "file.convert";
+    // ---- P3.3 vinePress GUI 面覆盖 ----
+    /// 探测外部工具（rar/7z）。
+    pub const TOOLS_PROBE: &str = "tools.probe";
+    /// 全保真目录扫描（返回 ScanResponse：树 + entries）。
+    pub const SCAN_DIRECTORY: &str = "scan.directory";
+    /// 保存项目文件。
+    pub const PROJECT_SAVE: &str = "project.save";
+    /// 加载项目文件。
+    pub const PROJECT_LOAD: &str = "project.load";
+    /// 列目录。
+    pub const FS_LIST: &str = "fs.list";
+    /// 建目录。
+    pub const FS_MKDIR: &str = "fs.mkdir";
+    /// 命名方案列表。
+    pub const NAMES_PROFILES: &str = "names.profiles";
+    /// 预览备注文本。
+    pub const NOTES_PREVIEW: &str = "notes.preview";
     /// 取消任务（通知）。
     pub const TASK_CANCEL: &str = "task.cancel";
     /// 进度通知。

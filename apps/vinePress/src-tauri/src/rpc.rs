@@ -1,7 +1,8 @@
 //! `--rpc` 模式：sidecar JSON-RPC over stdio（协议 v1，vinePress）。
 //!
 //! - argv 最早分流进入本模块，跳过 Tauri GUI 初始化
-//! - 方法面：`plan.start`（试算分类不落盘）/ `dupes.find` / `export.start`（zip）
+//! - 方法面：`plan.start` / `dupes.find` / `export.start`（zip）
+//!   + P3.3 GUI 面覆盖（`scan.directory`/`project.*`/`fs.*`/`names.*`/`notes.*`/`tools.probe`）
 //!   / `task.cancel`（通知）；ack 先回 taskId，进度走 `task.progress`，
 //!   终态以同 id 第二响应返回（id 配对 = 终态）
 
@@ -20,10 +21,12 @@ use vine_plugin_api::{
     TaskProgressParams, codes, method, parse_request_line, to_line,
 };
 
-use crate::{detect, project, scan};
+use crate::{commands, detect, project, scan};
 
 const PLUGIN_ID: &str = "vine.press";
-const CAPABILITIES: &[&str] = &["plan", "dupes", "export", "cancel"];
+const CAPABILITIES: &[&str] = &[
+    "plan", "dupes", "export", "cancel", "scan", "project", "fs", "names", "notes", "tools",
+];
 
 struct TaskEntry {
     cancel: Arc<AtomicBool>,
@@ -147,6 +150,15 @@ fn handle_request(state: &Arc<RpcState>, req: RpcRequest) {
         method::PLAN_START => handle_plan_start(state, id, req.params),
         method::DUPES_FIND => handle_dupes_find(state, id, req.params),
         method::EXPORT_START => handle_export_start(state, id, req.params),
+        // ---- P3.3 GUI 面覆盖 ----
+        method::TOOLS_PROBE => handle_tools_probe(id, req.params),
+        method::SCAN_DIRECTORY => handle_scan_directory(state, id, req.params),
+        method::PROJECT_SAVE => handle_project_save(id, req.params),
+        method::PROJECT_LOAD => handle_project_load(id, req.params),
+        method::FS_LIST => handle_fs_list(id, req.params),
+        method::FS_MKDIR => handle_fs_mkdir(id, req.params),
+        method::NAMES_PROFILES => handle_names_profiles(id, req.params),
+        method::NOTES_PREVIEW => handle_notes_preview(id, req.params),
         method::TASK_CANCEL => handle_task_cancel(state, id, req.params),
         other => RpcResponse::error(
             Some(id),
@@ -493,5 +505,133 @@ fn handle_task_cancel(state: &Arc<RpcState>, id: RequestId, params: Option<Value
             Some(id),
             RpcError::new(codes::TASK_NOT_FOUND, format!("任务不存在: {}", params.task_id)),
         ),
+    }
+}
+
+// ==================== P3.3 GUI 面覆盖（快速单响应） ====================
+
+fn handle_tools_probe(id: RequestId, _params: Option<Value>) -> RpcResponse {
+    success(id, commands::probe_tools())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectPathParams {
+    path: String,
+}
+
+fn handle_project_save(id: RequestId, params: Option<Value>) -> RpcResponse {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Params {
+        path: String,
+        project: project::Project,
+    }
+    let p: Params = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    match commands::save_project(p.path, p.project) {
+        Ok(()) => success(id, json!({ "ok": true })),
+        Err(e) => RpcResponse::error(Some(id), RpcError::new(codes::PLUGIN_INTERNAL, e)),
+    }
+}
+
+fn handle_project_load(id: RequestId, params: Option<Value>) -> RpcResponse {
+    let p: ProjectPathParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    match commands::load_project(p.path) {
+        Ok(project) => success(id, project),
+        Err(e) => RpcResponse::error(Some(id), RpcError::new(codes::PLUGIN_INTERNAL, e)),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FsListParams {
+    root: String,
+    path: String,
+    #[serde(default)]
+    show_all: bool,
+}
+
+fn handle_fs_list(id: RequestId, params: Option<Value>) -> RpcResponse {
+    let p: FsListParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    match commands::list_dir(p.root, p.path, p.show_all) {
+        Ok(items) => success(id, items),
+        Err(e) => RpcResponse::error(Some(id), RpcError::new(codes::PLUGIN_INTERNAL, e)),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FsMkdirParams {
+    root: String,
+    path: String,
+}
+
+fn handle_fs_mkdir(id: RequestId, params: Option<Value>) -> RpcResponse {
+    let p: FsMkdirParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    match commands::make_directory(p.root, p.path) {
+        Ok(()) => success(id, json!({ "ok": true })),
+        Err(e) => RpcResponse::error(Some(id), RpcError::new(codes::PLUGIN_INTERNAL, e)),
+    }
+}
+
+fn handle_names_profiles(id: RequestId, _params: Option<Value>) -> RpcResponse {
+    success(id, commands::name_profiles())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotesPreviewParams {
+    root: String,
+    entry: project::Entry,
+}
+
+fn handle_notes_preview(id: RequestId, params: Option<Value>) -> RpcResponse {
+    let p: NotesPreviewParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    match commands::preview_note(p.root, p.entry) {
+        Ok(text) => success(id, json!({ "text": text })),
+        Err(e) => RpcResponse::error(Some(id), RpcError::new(codes::PLUGIN_INTERNAL, e)),
+    }
+}
+
+// ==================== P3.3 全保真扫描（阻塞单响应，对齐 GUI invoke 语义） ====================
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanDirectoryParams {
+    root: String,
+    #[serde(default)]
+    overrides: project::Overrides,
+}
+
+fn handle_scan_directory(_state: &Arc<RpcState>, id: RequestId, params: Option<Value>) -> RpcResponse {
+    let p: ScanDirectoryParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    if !PathBuf::from(&p.root).is_dir() {
+        return invalid_params(id, format!("root 不是目录: {}", p.root));
+    }
+    eprintln!("[vine-press] scan.directory start: {}", p.root);
+    match commands::scan_directory(p.root, p.overrides) {
+        Ok(resp) => {
+            eprintln!("[vine-press] scan.directory done");
+            success(id, resp)
+        }
+        Err(e) => RpcResponse::error(Some(id), RpcError::new(codes::PLUGIN_INTERNAL, e)),
     }
 }

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { hubInvoke, hubTaskRequest, isHubEmbedded } from './host-bridge';
 
 // ---------------------------------------------------------------- 类型（与 Rust 侧 serde 对齐）
 
@@ -306,17 +307,28 @@ export interface ExportRequest {
 }
 
 // ---------------------------------------------------------------- 命令封装
+// P3.3 双模：hub iframe → host-bridge（postMessage）；独立 → 原生 invoke。
+// 仅已映射 sidecar RPC 的命令走双模；其余保持独立 invoke（宿主内暂不可用）。
 
 export const scanDirectory = (root: string, overrides: Overrides): Promise<ScanResponse> =>
-  invoke<ScanResponse>('scan_directory', { root, overrides });
+  isHubEmbedded()
+    ? hubTaskRequest<ScanResponse>('scan.directory', { root, overrides })
+    : invoke<ScanResponse>('scan_directory', { root, overrides });
 
-export const probeTools = (): Promise<ToolInfo> => invoke<ToolInfo>('probe_tools');
+export const probeTools = (): Promise<ToolInfo> =>
+  isHubEmbedded()
+    ? hubInvoke<ToolInfo>('tools.probe', 'probe_tools')
+    : invoke<ToolInfo>('probe_tools');
 
 export const saveProject = (path: string, project: Project): Promise<void> =>
-  invoke('save_project', { path, project });
+  isHubEmbedded()
+    ? hubInvoke('project.save', 'save_project', { path, project }).then(() => undefined)
+    : invoke('save_project', { path, project });
 
 export const loadProject = (path: string): Promise<Project> =>
-  invoke<Project>('load_project', { path });
+  isHubEmbedded()
+    ? hubInvoke<Project>('project.load', 'load_project', { path })
+    : invoke<Project>('load_project', { path });
 
 export const startGenerateNotes = (root: string, entries: Entry[]): Promise<void> =>
   invoke('start_generate_notes', { root, entries });
@@ -345,7 +357,9 @@ export const autoFillProposals = (
   invoke<Proposal[]>('auto_fill_proposals', { root, entries, fields });
 
 export const listDir = (root: string, path: string, showAll: boolean): Promise<FileItem[]> =>
-  invoke<FileItem[]>('list_dir', { root, path, showAll });
+  isHubEmbedded()
+    ? hubInvoke<FileItem[]>('fs.list', 'list_dir', { root, path, showAll })
+    : invoke<FileItem[]>('list_dir', { root, path, showAll });
 
 export const openPath = (root: string, path: string): Promise<void> =>
   invoke('open_path', { root, path });
@@ -354,7 +368,9 @@ export const revealPath = (root: string, path: string): Promise<void> =>
   invoke('reveal_path', { root, path });
 
 export const makeDirectory = (root: string, path: string): Promise<void> =>
-  invoke('make_directory', { root, path });
+  isHubEmbedded()
+    ? hubInvoke('fs.mkdir', 'make_directory', { root, path }).then(() => undefined)
+    : invoke('make_directory', { root, path });
 
 export const copyItems = (root: string, items: string[], dest: string): Promise<string[]> =>
   invoke<string[]>('copy_items', { root, items, dest });
@@ -374,7 +390,9 @@ export const renamePath = (
 
 /** 命名档案下拉项 [(id, 显示名)] */
 export const nameProfiles = (): Promise<[string, string][]> =>
-  invoke<[string, string][]>('name_profiles');
+  isHubEmbedded()
+    ? hubInvoke<[string, string][]>('names.profiles', 'name_profiles')
+    : invoke<[string, string][]>('name_profiles');
 
 /** 按目标平台/网盘规则全盘检查名称（只读） */
 export const checkNames = (root: string, profile: string): Promise<NameCheckResult> =>
@@ -391,7 +409,11 @@ export const fixNames = (
 // ---------------------------------------------------------------- 预览 / 自检 / 回收站
 
 export const previewNote = (root: string, entry: Entry): Promise<string> =>
-  invoke<string>('preview_note', { root, entry });
+  isHubEmbedded()
+    ? hubInvoke<{ text: string }>('notes.preview', 'preview_note', { root, entry }).then(
+        (r) => r.text,
+      )
+    : invoke<string>('preview_note', { root, entry });
 
 /** 说明文件字段级对比的一行（现有 vs 按当前条目重新渲染） */
 export interface FieldDiff {
@@ -434,17 +456,31 @@ export const trashItems = (root: string, items: string[]): Promise<string[]> =>
 /** 退出应用（菜单「文件 → 退出」） */
 export const quitApp = (): Promise<void> => invoke('quit_app');
 
+// 事件订阅：宿主 iframe 内无 Tauri 事件系统，返回 no-op 保持调用方不崩
+// （任务进度在 hub 模式经 task.list 轮询，见 host-bridge.hubTaskRequest）。
+const safeListen = <T>(
+  event: string,
+  cb: (payload: T) => void,
+): Promise<UnlistenFn> => {
+  if (isHubEmbedded()) {
+    void event;
+    void cb;
+    return Promise.resolve(() => {});
+  }
+  return listen<T>(event, (e) => cb(e.payload));
+};
+
 export const onNotesProgress = (cb: (p: NotesProgress) => void): Promise<UnlistenFn> =>
-  listen<NotesProgress>('notes-progress', (e) => cb(e.payload));
+  safeListen<NotesProgress>('notes-progress', cb);
 
 export const onNoteAuditProgress = (cb: (p: AuditProgress) => void): Promise<UnlistenFn> =>
-  listen<AuditProgress>('note-audit-progress', (e) => cb(e.payload));
+  safeListen<AuditProgress>('note-audit-progress', cb);
 
 export const onDupesProgress = (cb: (p: DupesProgress) => void): Promise<UnlistenFn> =>
-  listen<DupesProgress>('dupes-progress', (e) => cb(e.payload));
+  safeListen<DupesProgress>('dupes-progress', cb);
 
 export const onVerifyProgress = (cb: (p: VerifyProgress) => void): Promise<UnlistenFn> =>
-  listen<VerifyProgress>('verify-progress', (e) => cb(e.payload));
+  safeListen<VerifyProgress>('verify-progress', cb);
 
 export const onExportProgress = (cb: (p: ExportProgress) => void): Promise<UnlistenFn> =>
-  listen<ExportProgress>('export-progress', (e) => cb(e.payload));
+  safeListen<ExportProgress>('export-progress', cb);
