@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { isHubEmbedded } from "./host-bridge";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import type {
@@ -127,10 +128,17 @@ function AppShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.config.language]);
 
-  // 后端事件
+  // 后端事件（宿主 iframe 无 Tauri 事件系统则 no-op）
   useEffect(() => {
+    function safeListen<T>(
+      event: string,
+      cb: (e: { payload: T }) => void,
+    ): Promise<() => void> {
+      if (isHubEmbedded()) return Promise.resolve(() => {});
+      return listen<T>(event, cb);
+    }
     const unsubs: Array<Promise<() => void>> = [
-      listen<StartedEvt>("sync-started", () => {
+      safeListen<StartedEvt>("sync-started", () => {
         setProgress(null);
         setPaused(false);
         rateRef.current = { lastT: 0, lastBytes: 0, lastDone: 0, bytesPerSec: 0, filesPerSec: 0 };
@@ -139,7 +147,7 @@ function AppShell() {
         setScanRate(0);
         void refresh();
       }),
-      listen<ProgressEvt>("sync-progress", (e) => {
+      safeListen<ProgressEvt>("sync-progress", (e) => {
         const p = e.payload;
         const st = rateRef.current;
         const now = performance.now();
@@ -156,7 +164,7 @@ function AppShell() {
         setRate({ bytesPerSec: st.bytesPerSec, filesPerSec: st.filesPerSec });
         setProgress(p);
       }),
-      listen<ScanProgressEvt>("scan-progress", (e) => {
+      safeListen<ScanProgressEvt>("scan-progress", (e) => {
         const p = e.payload;
         const st = scanRateRef.current;
         const now = performance.now();
@@ -170,7 +178,7 @@ function AppShell() {
         setScanRate(st.filesPerSec);
         setScan(p);
       }),
-      listen<FinishedEvt>("sync-finished", (e) => {
+      safeListen<FinishedEvt>("sync-finished", (e) => {
         const p = e.payload;
         setProgress(null);
         setScan(null);

@@ -24,7 +24,17 @@ use crate::model::{ChangeKind, Config, Counts, DeletePolicy, PairConfig};
 use crate::runtime;
 
 const PLUGIN_ID: &str = "vine.sync";
-const CAPABILITIES: &[&str] = &["preview", "sync", "cancel"];
+const CAPABILITIES: &[&str] = &[
+    "preview",
+    "sync",
+    "cancel",
+    "state",
+    "config",
+    "history",
+    "filter",
+    "versions",
+    "info",
+];
 
 struct TaskEntry {
     cancel: Arc<AtomicBool>,
@@ -70,6 +80,12 @@ impl RpcState {
 }
 
 fn headless_app_dir() -> PathBuf {
+    // 测试/隔离：显式指定数据目录时优先（CI 与协议测试不触碰真实 %APPDATA%）
+    if let Ok(dir) = std::env::var("VINESYNC_DATA_DIR") {
+        let p = PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&p);
+        return p;
+    }
     if let Some(portable) = crate::storage::paths::portable_data_dir() {
         return portable;
     }
@@ -159,6 +175,14 @@ fn handle_request(state: &Arc<RpcState>, req: RpcRequest) {
         method::PING => success(id, json!({ "pong": true })),
         method::SYNC_PREVIEW => handle_sync_preview(state, id, req.params),
         method::SYNC_START => handle_sync_start(state, id, req.params),
+        method::STATE_GET => handle_state_get(state, id),
+        method::CONFIG_SAVE => handle_config_save(state, id, req.params),
+        method::HISTORY_LIST => handle_history_list(state, id, req.params),
+        method::HISTORY_CLEAR => handle_history_clear(state, id),
+        method::HISTORY_EXPORT => handle_history_export(state, id, req.params),
+        method::FILTER_TEST => handle_filter_test(id, req.params),
+        method::VERSIONS_CLEANUP => handle_versions_cleanup(state, id, req.params),
+        method::APP_INFO => handle_app_info(state, id),
         method::TASK_CANCEL => handle_task_cancel(state, id, req.params),
         other => RpcResponse::error(
             Some(id),
@@ -449,6 +473,194 @@ fn handle_sync_start(
     });
 
     ack
+}
+
+/// 状态：headless 无在线同步器，pair_states 为空；syncing/queued 恒 false。
+fn state_payload(state: &RpcState) -> crate::model::StateDto {
+    crate::model::StateDto {
+        config: state.load_config(),
+        pair_states: Vec::new(),
+        syncing: false,
+        queued: false,
+    }
+}
+
+fn handle_state_get(state: &Arc<RpcState>, id: RequestId) -> RpcResponse {
+    success(id, state_payload(state))
+}
+
+fn handle_config_save(state: &Arc<RpcState>, id: RequestId, params: Option<Value>) -> RpcResponse {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SaveParams {
+        config: Config,
+    }
+    let SaveParams { mut config } = match serde_json::from_value::<SaveParams>(params.unwrap_or(Value::Null))
+    {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    for p in &mut config.pairs {
+        crate::commands::normalize_pair(p);
+    }
+    if let Err(e) = crate::commands::validate_config(&config) {
+        return invalid_params(id, e);
+    }
+    let path = state.app_dir.join("config.json");
+    if let Err(e) = crate::storage::config::save(&path, &config) {
+        return RpcResponse::error(
+            Some(id),
+            RpcError::new(codes::PLUGIN_INTERNAL, format!("保存配置失败: {e}")),
+        );
+    }
+    // 保存后回读，保证响应与磁盘一致
+    success(id, state_payload(state))
+}
+
+fn handle_history_list(state: &Arc<RpcState>, id: RequestId, params: Option<Value>) -> RpcResponse {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct HistoryParams {
+        #[serde(default)]
+        limit: Option<u32>,
+    }
+    let params: HistoryParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    let db_path = state.app_dir.join("state.db");
+    let db = match crate::storage::db::Db::open(&db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            return RpcResponse::error(
+                Some(id),
+                RpcError::new(codes::PLUGIN_INTERNAL, format!("打开历史库失败: {e}")),
+            )
+        }
+    };
+    match db.history(params.limit.unwrap_or(300)) {
+        Ok(rows) => success(id, json!({ "rows": rows })),
+        Err(e) => RpcResponse::error(
+            Some(id),
+            RpcError::new(codes::PLUGIN_INTERNAL, format!("读取历史失败: {e}")),
+        ),
+    }
+}
+
+fn handle_history_clear(state: &Arc<RpcState>, id: RequestId) -> RpcResponse {
+    let db_path = state.app_dir.join("state.db");
+    match crate::storage::db::Db::open(&db_path).and_then(|db| db.clear_history()) {
+        Ok(()) => success(id, json!({ "ok": true })),
+        Err(e) => RpcResponse::error(
+            Some(id),
+            RpcError::new(codes::PLUGIN_INTERNAL, format!("清空历史失败: {e}")),
+        ),
+    }
+}
+
+fn handle_history_export(state: &Arc<RpcState>, id: RequestId, params: Option<Value>) -> RpcResponse {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ExportParams {
+        path: String,
+        rows: Vec<crate::model::LogRow>,
+    }
+    let ExportParams { path, rows } = match serde_json::from_value::<ExportParams>(params.unwrap_or(Value::Null))
+    {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    if rows.is_empty() {
+        return invalid_params(id, "没有可导出的记录");
+    }
+    let csv = crate::commands::build_history_csv(&rows);
+    match std::fs::write(&path, csv) {
+        Ok(()) => success(id, json!({ "count": rows.len(), "path": path })),
+        Err(e) => RpcResponse::error(
+            Some(id),
+            RpcError::new(codes::PLUGIN_INTERNAL, format!("写入文件失败: {e}")),
+        ),
+    }
+}
+
+fn handle_filter_test(id: RequestId, params: Option<Value>) -> RpcResponse {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FilterParams {
+        include: Vec<String>,
+        exclude: Vec<String>,
+        path: String,
+    }
+    let FilterParams {
+        include,
+        exclude,
+        path,
+    } = match serde_json::from_value::<FilterParams>(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    match crate::commands::test_filter(include, exclude, path) {
+        Ok(dto) => success(id, dto),
+        Err(e) => invalid_params(id, e),
+    }
+}
+
+fn handle_versions_cleanup(
+    state: &Arc<RpcState>,
+    id: RequestId,
+    params: Option<Value>,
+) -> RpcResponse {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CleanupParams {
+        #[serde(default)]
+        pair_id: Option<String>,
+    }
+    let params: CleanupParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    let config = state.load_config();
+    let keep = config.version_keep_days;
+    let pairs: Vec<PairConfig> = match &params.pair_id {
+        Some(pid) => {
+            match config.pairs.iter().find(|p| &p.id == pid).cloned() {
+                Some(p) => vec![p],
+                None => return invalid_params(id, format!("配置中不存在同步对: {pid}")),
+            }
+        }
+        None => config.pairs.clone(),
+    };
+    let mut total = 0u32;
+    for p in pairs {
+        if !crate::core::drive_available(&p.dest) {
+            continue;
+        }
+        match crate::core::version::cleanup(std::path::Path::new(&p.dest), keep) {
+            Ok(n) => total += n,
+            Err(e) => {
+                return RpcResponse::error(
+                    Some(id),
+                    RpcError::new(codes::PLUGIN_INTERNAL, format!("清理版本失败: {e}")),
+                )
+            }
+        }
+    }
+    success(id, json!({ "count": total }))
+}
+
+fn handle_app_info(state: &Arc<RpcState>, id: RequestId) -> RpcResponse {
+    success(
+        id,
+        json!({
+            "portable": crate::storage::paths::portable_data_dir().is_some(),
+            "dataDir": state.app_dir.to_string_lossy(),
+            "exePath": std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            "version": env!("CARGO_PKG_VERSION"),
+        }),
+    )
 }
 
 fn handle_task_cancel(state: &Arc<RpcState>, id: RequestId, params: Option<Value>) -> RpcResponse {

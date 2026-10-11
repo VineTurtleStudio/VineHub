@@ -54,6 +54,23 @@ pub mod method {
     pub const NAMES_PROFILES: &str = "names.profiles";
     /// 预览备注文本。
     pub const NOTES_PREVIEW: &str = "notes.preview";
+    // ---- P3.3 vineSync GUI 面覆盖 ----
+    /// 读取状态（config + 空 pair 状态；headless 无在线同步器）。
+    pub const STATE_GET: &str = "state.get";
+    /// 校验并保存 config.json。
+    pub const CONFIG_SAVE: &str = "config.save";
+    /// 历史日志列表。
+    pub const HISTORY_LIST: &str = "history.list";
+    /// 清空历史日志。
+    pub const HISTORY_CLEAR: &str = "history.clear";
+    /// 导出历史日志 CSV。
+    pub const HISTORY_EXPORT: &str = "history.export";
+    /// 测试路径在包含/排除规则下是否参与同步。
+    pub const FILTER_TEST: &str = "filter.test";
+    /// 清理超期版本副本。
+    pub const VERSIONS_CLEANUP: &str = "versions.cleanup";
+    /// 应用信息（便携模式/数据目录/版本）。
+    pub const APP_INFO: &str = "app.info";
     /// 取消任务（通知）。
     pub const TASK_CANCEL: &str = "task.cancel";
     /// 进度通知。

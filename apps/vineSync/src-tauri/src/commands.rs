@@ -8,7 +8,7 @@ use crate::AppCtx;
 use std::path::Path;
 use tauri::Manager;
 
-fn normalize_pair(pair: &mut crate::model::PairConfig) {
+pub(crate) fn normalize_pair(pair: &mut crate::model::PairConfig) {
     pair.name = pair.name.trim().to_string();
     pair.source = pair.source.trim().to_string();
     pair.dest = pair.dest.trim().to_string();
@@ -32,7 +32,7 @@ fn normalize_pair(pair: &mut crate::model::PairConfig) {
         .collect();
 }
 
-fn validate_config(config: &Config) -> Result<(), String> {
+pub(crate) fn validate_config(config: &Config) -> Result<(), String> {
     let mut ids: Vec<String> = Vec::new();
     for p in &config.pairs {
         let name = if p.name.is_empty() {
@@ -191,7 +191,7 @@ fn csv_field(s: &str) -> String {
 }
 
 /// 构建历史日志 CSV（含 UTF-8 BOM，Excel 可直接打开）
-fn build_history_csv(rows: &[crate::model::LogRow]) -> String {
+pub(crate) fn build_history_csv(rows: &[crate::model::LogRow]) -> String {
     let mut out = String::from("\u{FEFF}");
     out.push_str(
         "id,pair_id,pair_name,started_at,finished_at,status,added,updated,deleted,versioned,skipped,failed,trigger,message\r\n",

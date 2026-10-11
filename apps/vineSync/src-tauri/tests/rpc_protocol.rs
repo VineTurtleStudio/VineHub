@@ -17,8 +17,11 @@ struct Client {
 
 impl Client {
     fn spawn() -> Self {
+        // 隔离数据目录：state.db / config.json 写到临时目录，不触碰真实 %APPDATA%
+        let data_dir = temp_dir("data");
         let mut child = Command::new(env!("CARGO_BIN_EXE_vinesync"))
             .arg("--rpc")
+            .env("VINESYNC_DATA_DIR", &data_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -224,4 +227,121 @@ fn invalid_params_rejected() {
         .recv_response_for(12, Duration::from_secs(5))
         .expect("应有错误响应");
     assert_eq!(resp["error"]["code"], -32601);
+}
+
+#[test]
+fn state_get_filter_test_app_info_roundtrip() {
+    let mut client = Client::spawn();
+
+    // state.get：headless 状态（空 pair 列表 + 默认配置）
+    client.request(20, "state.get", None);
+    let resp = client
+        .recv_response_for(20, Duration::from_secs(5))
+        .expect("state.get 应有响应");
+    let result = &resp["result"];
+    assert!(result["config"].is_object(), "应含 config: {result}");
+    assert_eq!(result["syncing"], false);
+    assert!(result["pairStates"].as_array().unwrap().is_empty());
+
+    // filter.test：命中标记
+    client.request(
+        21,
+        "filter.test",
+        Some(serde_json::json!({
+            "include": ["**/*.txt"],
+            "exclude": [],
+            "path": "docs/readme.txt",
+        })),
+    );
+    let resp = client
+        .recv_response_for(21, Duration::from_secs(5))
+        .expect("filter.test 应有响应");
+    assert_eq!(resp["result"]["matched"], true, "得到 {resp}");
+
+    // filter.test：排除命中
+    client.request(
+        22,
+        "filter.test",
+        Some(serde_json::json!({
+            "include": ["**/*"],
+            "exclude": ["*.tmp"],
+            "path": "a/b.tmp",
+        })),
+    );
+    let resp = client
+        .recv_response_for(22, Duration::from_secs(5))
+        .expect("filter.test 应有响应");
+    assert_eq!(resp["result"]["matched"], false, "得到 {resp}");
+
+    // app.info
+    client.request(23, "app.info", None);
+    let resp = client
+        .recv_response_for(23, Duration::from_secs(5))
+        .expect("app.info 应有响应");
+    assert!(resp["result"]["dataDir"].is_string());
+    assert!(resp["result"]["version"].is_string());
+}
+
+#[test]
+fn config_save_history_roundtrip() {
+    let mut client = Client::spawn();
+
+    // 保存非法配置（copyThreads 越界）→ -32602
+    client.request(
+        30,
+        "config.save",
+        Some(serde_json::json!({
+            "config": { "copyThreads": 99, "pairs": [] }
+        })),
+    );
+    let resp = client
+        .recv_response_for(30, Duration::from_secs(5))
+        .expect("非法配置应报错");
+    assert_eq!(resp["error"]["code"], -32602, "得到 {resp}");
+
+    // 合法配置保存 → 回读一致（源/目标须互不包含）
+    let pair_src = temp_dir("cfg-src");
+    let pair_dst = temp_dir("cfg-dst");
+    client.request(
+        31,
+        "config.save",
+        Some(serde_json::json!({
+            "config": {
+                "copyThreads": 4,
+                "pairs": [{
+                    "id": "p1",
+                    "name": "测试对",
+                    "source": pair_src.display().to_string(),
+                    "dest": pair_dst.display().to_string(),
+                    "enabled": true,
+                    "include": [],
+                    "exclude": [],
+                    "intervalMinutes": null
+                }]
+            }
+        })),
+    );
+    let resp = client
+        .recv_response_for(31, Duration::from_secs(5))
+        .expect("保存配置应成功");
+    assert_eq!(resp["result"]["config"]["copyThreads"], 4);
+    assert_eq!(resp["result"]["config"]["pairs"][0]["id"], "p1", "得到 {resp}");
+
+    // history.list：新库为空数组
+    client.request(
+        32,
+        "history.list",
+        Some(serde_json::json!({ "limit": 10 })),
+    );
+    let resp = client
+        .recv_response_for(32, Duration::from_secs(5))
+        .expect("history.list 应有响应");
+    assert!(resp["result"]["rows"].as_array().unwrap().is_empty(), "得到 {resp}");
+
+    // history.clear：ok
+    client.request(33, "history.clear", None);
+    let resp = client
+        .recv_response_for(33, Duration::from_secs(5))
+        .expect("history.clear 应有响应");
+    assert_eq!(resp["result"]["ok"], true);
 }
