@@ -4,7 +4,7 @@
   "name": "vineCurator",
   "version": "0.1.0",
   "apiVersion": "1.0",
-  "kind": "external",
+  "kind": "sidecar",
   "entry": "../../target/debug/vine-curator.exe",
   "panels": [],
   "commands": [],

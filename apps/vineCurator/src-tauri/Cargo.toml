@@ -17,6 +17,7 @@ image = "0.25"
 argon2 = "0.5"
 # 开 password-hash/getrandom → 提供 rand_core::OsRng（SaltString::generate 需要），与 argon2 共用同一实例
 password-hash = { version = "0.5", features = ["getrandom"] }
+vine-plugin-api = { workspace = true }
 
 [lib]
 name = "vine_curator_lib"

@@ -13,6 +13,7 @@ pub mod meta;
 pub mod ocr;
 pub mod port;
 pub mod rules;
+pub mod rpc;
 pub mod scan;
 pub mod shell;
 pub mod smart;

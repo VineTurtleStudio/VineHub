@@ -27,6 +27,14 @@ pub mod method {
     pub const SYNC_PREVIEW: &str = "sync.preview";
     /// vineSync 执行同步。
     pub const SYNC_START: &str = "sync.start";
+    /// vineCurator 建库根目录（headless 注册）。
+    pub const LIBRARY_ADD_ROOT: &str = "library.addRoot";
+    /// vineCurator 列出已注册根目录。
+    pub const LIBRARY_ROOTS: &str = "library.roots";
+    /// vineCurator 扫描根目录入库。
+    pub const LIBRARY_SCAN: &str = "library.scan";
+    /// vineCurator 全文检索。
+    pub const SEARCH_ITEMS: &str = "search.items";
     /// 取消任务（通知）。
     pub const TASK_CANCEL: &str = "task.cancel";
     /// 进度通知。
