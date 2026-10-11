@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ImportResult, PluginView } from "./types";
+import type { ImportResult, PluginView, ScanPoll, ScanStartResult } from "./types";
 
 export function listPlugins(): Promise<PluginView[]> {
   return invoke<PluginView[]>("list_plugins");
@@ -33,4 +33,34 @@ export function importPluginZip(zipPath: string): Promise<ImportResult> {
 
 export function getPluginsDir(): Promise<string> {
   return invoke<string>("get_plugins_dir");
+}
+
+export function scanStart(
+  pluginId: string,
+  path: string,
+  types: string[],
+  deep: boolean,
+): Promise<ScanStartResult> {
+  return invoke<ScanStartResult>("scan_start", {
+    pluginId,
+    path,
+    types,
+    deep,
+  });
+}
+
+export function scanPoll(pluginId: string): Promise<ScanPoll> {
+  return invoke<ScanPoll>("scan_poll", { pluginId });
+}
+
+export function scanCancel(pluginId: string): Promise<void> {
+  return invoke<void>("scan_cancel", { pluginId });
+}
+
+export function scanReset(pluginId: string): Promise<void> {
+  return invoke<void>("scan_reset", { pluginId });
+}
+
+export function sidecarStatus(pluginId: string): Promise<Record<string, unknown>> {
+  return invoke("sidecar_status", { pluginId });
 }

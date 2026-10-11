@@ -10,7 +10,7 @@
 use std::io::{BufRead, Write};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use vine_plugin_api::{
     method, parse_request_line, to_line, PluginInfo, RpcError, RpcRequest, RpcResponse,
     ScanStartResult, TaskProgressParams,
@@ -40,6 +40,7 @@ fn main() {
                     capabilities: vec![
                         "echo".into(),
                         "progress".into(),
+                        "scan".into(),
                         "block".into(),
                         "crash".into(),
                     ],
@@ -68,6 +69,39 @@ fn main() {
                     &mut stdout,
                     RpcResponse::success(id, ScanStartResult { task_id: "t-demo".into() })
                         .unwrap(),
+                );
+            }
+            "scan.demo" => {
+                // 协议 v1 双响应：ack 回 taskId → 进度通知 → 同 id 终态
+                let task_id = "t-scan-demo";
+                reply(
+                    &mut stdout,
+                    RpcResponse::success(id.clone(), ScanStartResult { task_id: task_id.into() })
+                        .unwrap(),
+                );
+                for done in 1..=3u64 {
+                    let note = RpcRequest::notification(method::TASK_PROGRESS)
+                        .with_params(TaskProgressParams {
+                            task_id: task_id.into(),
+                            done,
+                            total: 3,
+                            msg: None,
+                        })
+                        .unwrap();
+                    reply(&mut stdout, note);
+                }
+                reply(
+                    &mut stdout,
+                    RpcResponse::success(
+                        id,
+                        json!({
+                            "taskId": task_id,
+                            "ok": 2,
+                            "bad": 1,
+                            "cancelled": false,
+                        }),
+                    )
+                    .unwrap(),
                 );
             }
             "block" => {

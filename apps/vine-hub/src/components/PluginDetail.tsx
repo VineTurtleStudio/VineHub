@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { PluginView } from "../types";
+import { PulsePanel } from "./PulsePanel";
 
 interface Props {
   plugin: PluginView;
@@ -102,12 +103,22 @@ export function PluginDetail({ plugin, busy, onLaunch, onOverrideSave, onToggleE
         </div>
       </div>
 
+      {plugin.kind === "sidecar" && <PulsePanel pluginId={plugin.id} />}
+
       <div className="card">
         <h2>生命周期</h2>
         <p className="hint">
-          当前为 <code>external</code> 形态：hub 仅负责一键启动独立程序，独立运行能力
-          100% 保留。P1 起 vinePulse 升级为 <code>sidecar</code>（JSON-RPC over
-          stdio）。
+          {plugin.kind === "sidecar" ? (
+            <>
+              当前为 <code>sidecar</code> 形态：宿主拉起子进程走 JSON-RPC over
+              stdio；独立 CLI 与 hub 插件共用同一 core，独立运行能力 100% 保留。
+            </>
+          ) : (
+            <>
+              当前为 <code>external</code> 形态：hub 仅负责一键启动独立程序，
+              独立运行能力 100% 保留。升级 sidecar 只改 manifest 的 kind 字段。
+            </>
+          )}
         </p>
       </div>
     </section>

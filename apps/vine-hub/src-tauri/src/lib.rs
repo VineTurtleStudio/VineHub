@@ -2,17 +2,28 @@
 
 mod commands;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use serde_json::Value;
 use tauri::Manager;
 use vine_host_core::{PluginRegistry, SidecarManager, Store};
+
+/// 进行中的 vinePulse 扫描（每插件至多一个）。
+pub struct PulseScan {
+    /// 后台线程确认 taskId 后写入。
+    pub task_holder: Arc<Mutex<Option<String>>>,
+    /// ack+终态双响应的终态槽。
+    pub terminal: Arc<Mutex<Option<Result<Value, String>>>>,
+}
 
 /// 宿主全局状态。
 pub struct AppState {
     pub registry: Mutex<PluginRegistry>,
     pub store: Mutex<Store>,
     pub sidecars: Mutex<SidecarManager>,
+    pub pulse_scans: Mutex<HashMap<String, PulseScan>>,
 }
 
 /// 开发期仓库内 `plugins/` 目录（安装版不存在时回退 app data 目录）。
@@ -52,6 +63,7 @@ pub fn run() {
                 registry: Mutex::new(registry),
                 store: Mutex::new(store),
                 sidecars: Mutex::new(SidecarManager::new()),
+                pulse_scans: Mutex::new(HashMap::new()),
             });
             Ok(())
         })
@@ -63,6 +75,11 @@ pub fn run() {
             commands::set_plugin_enabled,
             commands::import_plugin_zip,
             commands::get_plugins_dir,
+            commands::scan_start,
+            commands::scan_poll,
+            commands::scan_cancel,
+            commands::scan_reset,
+            commands::sidecar_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running VineHub");

@@ -252,6 +252,9 @@ pub struct ScanStartParams {
     pub path: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub types: Vec<String>,
+    /// 强制深度解码（超过大小阈值也解码）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep: Option<bool>,
 }
 
 /// `scan.start` 的即时 result（终态响应另带 ok/bad/report）。

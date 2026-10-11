@@ -4,10 +4,11 @@
   "name": "vinePulse",
   "version": "0.1.0",
   "apiVersion": "1.0",
-  "kind": "external",
+  "kind": "sidecar",
   "entry": "D:\\VineTurtleStudio\\Projects\\vinePulse\\target\\release\\vine-pulse.exe",
-  "panels": [],
-  "commands": [],
+  "panels": [
+    { "id": "scan", "title": "损坏检测", "ui": "dist/index.html", "icon": "pulse" }
+  ],  "commands": [],
   "permissions": {
     "fs.read": ["user-picked"],
     "fs.write": [],

@@ -95,7 +95,15 @@ impl SidecarConfig {
     }
 }
 
-type PendingMap = Arc<Mutex<HashMap<i64, Sender<Result<Value, RpcError>>>>>;
+type PendingMap = Arc<Mutex<HashMap<i64, PendingEntry>>>;
+
+/// pending 表条目：单响应请求 `ack_tx` 为 None（首个响应即终态）；
+/// ack+终态请求（如 `scan.start`）首个响应走 ack，后续同 id 响应为终态。
+#[derive(Debug)]
+struct PendingEntry {
+    ack_tx: Option<Sender<Result<Value, RpcError>>>,
+    done_tx: Sender<Result<Value, RpcError>>,
+}
 
 /// 一条已握手的 sidecar 连接。
 #[derive(Debug)]
@@ -152,6 +160,63 @@ impl SidecarHandle {
         )
     }
 
+    /// ack + 终态双响应请求（协议 v1：`scan.start` 第一响应回 taskId，
+    /// 终态以同 id 第二响应返回）。
+    pub fn request_with_ack(
+        &self,
+        method_name: &str,
+        params: Option<Value>,
+        ack_timeout: Duration,
+        done_timeout: Duration,
+    ) -> Result<(Value, Value), SidecarError> {
+        if !self.is_running() {
+            return Err(SidecarError::NotRunning);
+        }
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (ack_tx, ack_rx) = channel();
+        let (done_tx, done_rx) = channel();
+        self.pending.lock().unwrap().insert(
+            id,
+            PendingEntry {
+                ack_tx: Some(ack_tx),
+                done_tx,
+            },
+        );
+
+        let mut req = RpcRequest::new(RequestId::Number(id), method_name);
+        req.params = params;
+        let line = to_line(&req).map_err(|e| SidecarError::Encode(e.message))?;
+        if let Err(e) = write_line(&self.stdin, &line) {
+            self.pending.lock().unwrap().remove(&id);
+            return Err(e);
+        }
+
+        let ack = match ack_rx.recv_timeout(ack_timeout) {
+            Ok(Ok(value)) => value,
+            Ok(Err(rpc_err)) => {
+                self.pending.lock().unwrap().remove(&id);
+                return Err(rpc_err.into());
+            }
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&id);
+                return Err(SidecarError::Timeout {
+                    method: method_name.to_string(),
+                });
+            }
+        };
+        let done = match done_rx.recv_timeout(done_timeout) {
+            Ok(Ok(value)) => value,
+            Ok(Err(rpc_err)) => return Err(rpc_err.into()),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&id);
+                return Err(SidecarError::Timeout {
+                    method: method_name.to_string(),
+                });
+            }
+        };
+        Ok((ack, done))
+    }
+
     /// 发送通知（无 id，不等待响应）。
     pub fn notify(&self, method_name: &str, params: Option<Value>) -> Result<(), SidecarError> {
         let mut req = RpcRequest::notification(method_name);
@@ -165,13 +230,7 @@ impl SidecarHandle {
         let mut child = self.child.lock().unwrap();
         kill_tree(&mut child);
         // 回收所有挂起请求，避免调用方干等超时
-        let mut pending = self.pending.lock().unwrap();
-        for (_, tx) in pending.drain() {
-            let _ = tx.send(Err(RpcError::new(
-                vine_plugin_api::codes::PLUGIN_INTERNAL,
-                "子进程已被终止",
-            )));
-        }
+        drain_pending(&self.pending, "子进程已被终止");
     }
 }
 
@@ -358,8 +417,14 @@ fn send_request(
     timeout: Duration,
 ) -> Result<Value, SidecarError> {
     let id = next_id.fetch_add(1, Ordering::SeqCst);
-    let (tx, rx) = channel();
-    pending.lock().unwrap().insert(id, tx);
+    let (done_tx, done_rx) = channel();
+    pending.lock().unwrap().insert(
+        id,
+        PendingEntry {
+            ack_tx: None,
+            done_tx,
+        },
+    );
 
     let mut req = RpcRequest::new(RequestId::Number(id), method_name);
     req.params = params;
@@ -369,7 +434,7 @@ fn send_request(
         return Err(e);
     }
 
-    match rx.recv_timeout(timeout) {
+    match done_rx.recv_timeout(timeout) {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(rpc_err)) => Err(rpc_err.into()),
         Err(_) => {
@@ -378,6 +443,16 @@ fn send_request(
                 method: method_name.to_string(),
             })
         }
+    }
+}
+
+fn drain_pending(pending: &PendingMap, reason: &str) {
+    for (_, entry) in pending.lock().unwrap().drain() {
+        let err = RpcError::new(vine_plugin_api::codes::PLUGIN_INTERNAL, reason);
+        if let Some(tx) = entry.ack_tx {
+            let _ = tx.send(Err(err.clone()));
+        }
+        let _ = entry.done_tx.send(Err(err));
     }
 }
 
@@ -404,12 +479,28 @@ fn spawn_reader_thread(
             match parse_response_line(&line) {
                 Ok(resp) => {
                     if let Some(RequestId::Number(n)) = resp.id {
-                        if let Some(tx) = pending.lock().unwrap().remove(&n) {
-                            let delivery = match (resp.result, resp.error) {
-                                (_, Some(err)) => Err(err),
-                                (result, None) => Ok(result.unwrap_or(Value::Null)),
-                            };
-                            let _ = tx.send(delivery);
+                        let mut finished = false;
+                        {
+                            let mut pending = pending.lock().unwrap();
+                            if let Some(entry) = pending.get_mut(&n) {
+                                let delivery = match (resp.result, resp.error) {
+                                    (_, Some(err)) => Err(err),
+                                    (result, None) => Ok(result.unwrap_or(Value::Null)),
+                                };
+                                match entry.ack_tx.take() {
+                                    // 第一响应：ack 通道，保留 pending 等终态
+                                    Some(tx) => {
+                                        let _ = tx.send(delivery);
+                                    }
+                                    None => {
+                                        let _ = entry.done_tx.send(delivery);
+                                        finished = true;
+                                    }
+                                }
+                            }
+                        }
+                        if finished {
+                            pending.lock().unwrap().remove(&n);
                         }
                     }
                 }
@@ -423,12 +514,7 @@ fn spawn_reader_thread(
             }
         }
         // stdout EOF：所有挂起请求视为失败
-        for (_, tx) in pending.lock().unwrap().drain() {
-            let _ = tx.send(Err(RpcError::new(
-                vine_plugin_api::codes::PLUGIN_INTERNAL,
-                "插件 stdout 已关闭",
-            )));
-        }
+        drain_pending(&pending, "插件 stdout 已关闭");
     });
 }
 

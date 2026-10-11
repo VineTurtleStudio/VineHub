@@ -128,6 +128,54 @@ fn manager_spawn_replaces_existing_connection() {
 }
 
 #[test]
+fn request_with_ack_returns_ack_then_terminal() {
+    let mut manager = SidecarManager::new();
+    let config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    let handle = manager.spawn(config).expect("握手应成功");
+
+    let (ack, terminal) = handle
+        .request_with_ack(
+            "scan.demo",
+            None,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .expect("双响应请求应成功");
+
+    assert_eq!(ack["taskId"], "t-scan-demo");
+    assert_eq!(terminal["taskId"], "t-scan-demo");
+    assert_eq!(terminal["ok"], 2);
+    assert_eq!(terminal["bad"], 1);
+    assert_eq!(terminal["cancelled"], false);
+
+    // 进度通知应在终态前送达
+    let mut progress = 0;
+    while let Some(note) = handle.try_recv_notification() {
+        assert_eq!(note.method, method::TASK_PROGRESS);
+        progress += 1;
+    }
+    assert_eq!(progress, 3);
+}
+
+#[test]
+fn request_with_ack_timeout_cleans_pending() {
+    let mut manager = SidecarManager::new();
+    let mut config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    config.request_timeout = Duration::from_secs(2);
+    let handle = manager.spawn(config).expect("握手应成功");
+
+    // block 永不回 ack → ack 超时
+    let err = handle
+        .request_with_ack("block", None, Duration::from_millis(300), Duration::from_secs(5))
+        .unwrap_err();
+    assert!(matches!(err, SidecarError::Timeout { .. }), "得到 {err:?}");
+
+    // 连接仍可用
+    let result = handle.request("echo", Some(json!({ "ok": 1 }))).unwrap();
+    assert_eq!(result["ok"], 1);
+}
+
+#[test]
 fn stderr_log_is_captured() {
     let mut manager = SidecarManager::new();
     // 夹具不写 stderr，但通道应可用且为空
