@@ -6,7 +6,7 @@
   "apiVersion": "1.0",
   "kind": "sidecar",
   "entry": "../../target/debug/vinesync.exe",
-  "panels": [],
+  "panels": [ { "id": "main", "title": "同步", "ui": "dist/index.html", "icon": "sync" } ],
   "commands": [],
   "permissions": {
     "fs.read": ["all-selected"],

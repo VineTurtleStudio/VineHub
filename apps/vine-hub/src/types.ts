@@ -1,3 +1,10 @@
+export interface PanelView {
+  id: string;
+  title: string;
+  ui: string;
+  icon: string | null;
+}
+
 export interface PluginView {
   id: string;
   name: string;
@@ -9,6 +16,7 @@ export interface PluginView {
   statusReason: string | null;
   entryOverride: string | null;
   resolvedEntry: string | null;
+  panels: PanelView[];
 }
 
 export interface ImportResult {

@@ -6,7 +6,7 @@
   "apiVersion": "1.0",
   "kind": "sidecar",
   "entry": "../../target/debug/vine-palma-cursor.exe",
-  "panels": [],
+  "panels": [ { "id": "main", "title": "光标编辑", "ui": "dist/index.html", "icon": "cursor" } ],
   "commands": [],
   "permissions": {
     "fs.read": ["user-picked"],

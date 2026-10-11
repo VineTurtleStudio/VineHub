@@ -212,6 +212,10 @@ export default function App() {
             onLaunch={() => handleLaunch(selected.id)}
             onOverrideSave={(path) => handleOverrideSave(selected.id, path)}
             onToggleEnabled={() => handleToggleEnabled(selected)}
+            onNotify={(level, message) => {
+              if (level === "error") setError(message);
+              else setNotice(message);
+            }}
           />
         )}
 

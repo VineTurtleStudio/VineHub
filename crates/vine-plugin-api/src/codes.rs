@@ -19,6 +19,8 @@ pub const PERMISSION_DENIED: i32 = -32003;
 pub const TASK_NOT_FOUND: i32 = -32004;
 /// 插件内部错误。
 pub const PLUGIN_INTERNAL: i32 = -32005;
+/// 面板桥接：方法不在白名单。
+pub const BRIDGE_METHOD_NOT_ALLOWED: i32 = -32010;
 
 /// 错误码 → 人类可读名称。
 pub fn code_name(code: i32) -> &'static str {
@@ -32,6 +34,7 @@ pub fn code_name(code: i32) -> &'static str {
         PERMISSION_DENIED => "PermissionDenied",
         TASK_NOT_FOUND => "TaskNotFound",
         PLUGIN_INTERNAL => "PluginInternal",
+        BRIDGE_METHOD_NOT_ALLOWED => "BridgeMethodNotAllowed",
         _ => "Unknown",
     }
 }

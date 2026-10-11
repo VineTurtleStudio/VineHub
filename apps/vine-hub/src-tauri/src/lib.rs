@@ -71,6 +71,11 @@ pub fn run() {
             std::fs::create_dir_all(&logs_dir)
                 .map_err(|e| format!("无法创建日志目录 {}: {e}", logs_dir.display()))?;
 
+            // P3.1：asset protocol 放行插件目录（面板 iframe 加载 dist 资源）
+            app.asset_protocol_scope()
+                .allow_directory(&plugins_dir, true)
+                .map_err(|e| format!("配置 asset scope 失败: {e}"))?;
+
             app.manage(AppState {
                 registry: Mutex::new(registry),
                 store: Mutex::new(store),
@@ -96,6 +101,11 @@ pub fn run() {
             commands::task_list,
             commands::task_cancel_id,
             commands::task_retry,
+            commands::task_start,
+            commands::resolve_panel_ui,
+            commands::config_get,
+            commands::config_set,
+            commands::host_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running VineHub");

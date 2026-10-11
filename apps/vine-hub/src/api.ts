@@ -82,3 +82,30 @@ export function taskCancelId(taskId: string): Promise<void> {
 export function taskRetry(taskId: string): Promise<string> {
   return invoke<string>("task_retry", { taskId });
 }
+
+export function taskStart(
+  pluginId: string,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<string> {
+  return invoke<string>("task_start", { pluginId, method, params });
+}
+
+export function resolvePanelUi(
+  pluginId: string,
+  panelId: string,
+): Promise<string | null> {
+  return invoke<string | null>("resolve_panel_ui", { pluginId, panelId });
+}
+
+export function configGet(pluginId: string, key: string): Promise<string | null> {
+  return invoke<string | null>("config_get", { pluginId, key });
+}
+
+export function configSet(pluginId: string, key: string, value: string): Promise<void> {
+  return invoke<void>("config_set", { pluginId, key, value });
+}
+
+export function hostLog(pluginId: string, level: string, message: string): Promise<void> {
+  return invoke<void>("host_log", { pluginId, level, message });
+}

@@ -33,6 +33,17 @@ pub struct PluginView {
     pub status_reason: Option<String>,
     pub entry_override: Option<String>,
     pub resolved_entry: Option<String>,
+    pub panels: Vec<PanelView>,
+}
+
+/// 面板声明（manifest panels 的前端投影）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelView {
+    pub id: String,
+    pub title: String,
+    pub ui: String,
+    pub icon: Option<String>,
 }
 
 /// 导入 zip 的结果。
@@ -55,18 +66,30 @@ fn build_views(state: &AppState) -> Vec<PluginView> {
             let enabled = record.as_ref().map(|r| r.enabled).unwrap_or(true);
             let entry_override = record.and_then(|r| r.entry_override);
 
-            let (name, version, api_version, kind, registry_reason) = match &entry.manifest {
+            let (name, version, api_version, kind, registry_reason, panels) = match &entry.manifest
+            {
                 Some(m) => {
                     let reason = match &entry.status {
                         PluginStatus::Available => None,
                         PluginStatus::Unavailable { reason } => Some(reason.clone()),
                     };
+                    let panels = m
+                        .panels
+                        .iter()
+                        .map(|p| PanelView {
+                            id: p.id.clone(),
+                            title: p.title.clone(),
+                            ui: p.ui.clone(),
+                            icon: p.icon.clone(),
+                        })
+                        .collect();
                     (
                         m.name.clone(),
                         m.version.clone(),
                         m.api_version.clone(),
                         format!("{:?}", m.kind).to_lowercase(),
                         reason,
+                        panels,
                     )
                 }
                 None => {
@@ -80,6 +103,7 @@ fn build_views(state: &AppState) -> Vec<PluginView> {
                         "1.0".to_string(),
                         "external".to_string(),
                         Some(reason),
+                        Vec::new(),
                     )
                 }
             };
@@ -108,6 +132,7 @@ fn build_views(state: &AppState) -> Vec<PluginView> {
                 status_reason,
                 entry_override,
                 resolved_entry,
+                panels,
             }
         })
         .collect();
@@ -778,4 +803,107 @@ pub fn sidecar_status(
         Some(_) => Ok(json!({ "running": false, "reason": "进程已退出（可重试自动拉起）" })),
         None => Ok(json!({ "running": false, "reason": "尚未连接" })),
     }
+}
+
+// ==================== P3.1 面板桥接命令（见 docs/bridge-spec.md） ====================
+
+/// 解析面板 UI 入口为绝对路径（供前端 convertFileSrc）。
+#[tauri::command]
+pub fn resolve_panel_ui(
+    plugin_id: String,
+    panel_id: String,
+    state: State<'_, crate::AppState>,
+) -> Result<Option<String>, String> {
+    let registry = state.registry.lock().unwrap();
+    let Some(entry) = registry.get(&plugin_id) else {
+        return Err(format!("插件不存在: {plugin_id}"));
+    };
+    let Some(manifest) = &entry.manifest else {
+        return Ok(None);
+    };
+    let Some(panel) = manifest.panels.iter().find(|p| p.id == panel_id) else {
+        return Err(format!("面板不存在: {plugin_id}#{panel_id}"));
+    };
+    let ui_path = entry.root.join(&panel.ui);
+    if !ui_path.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(ui_path.display().to_string()))
+}
+
+/// 通用任务启动（桥接 task.start）：任意 RPC 方法 → ack+终态任务。
+#[tauri::command]
+pub fn task_start(
+    plugin_id: String,
+    method: String,
+    params: Value,
+    state: State<'_, crate::AppState>,
+) -> Result<String, String> {
+    start_task_impl(&state, &plugin_id, &method, params, None)
+}
+
+fn cfg_key(plugin_id: &str, key: &str) -> String {
+    format!("plugin.{plugin_id}.cfg.{key}")
+}
+
+/// 读取插件命名空间配置。
+#[tauri::command]
+pub fn config_get(
+    plugin_id: String,
+    key: String,
+    state: State<'_, crate::AppState>,
+) -> Result<Option<String>, String> {
+    let store = state.store.lock().unwrap();
+    store
+        .get_setting(&cfg_key(&plugin_id, &key))
+        .map_err(storage_err)
+}
+
+/// 写入插件命名空间配置。
+#[tauri::command]
+pub fn config_set(
+    plugin_id: String,
+    key: String,
+    value: String,
+    state: State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let store = state.store.lock().unwrap();
+    store
+        .set_setting(&cfg_key(&plugin_id, &key), &value)
+        .map_err(storage_err)
+}
+
+/// 插件 UI 日志 → `{logs_dir}/{pluginId}-ui.log` 追加一行。
+#[tauri::command]
+pub fn host_log(
+    plugin_id: String,
+    level: String,
+    message: String,
+    state: State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let line = format!(
+        "[{}] [{}] {}\n",
+        chrono_free_now(),
+        level,
+        message.replace('\n', " ")
+    );
+    let path = state.logs_dir.join(format!("{plugin_id}-ui.log"));
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("写日志失败: {e}"))?;
+    f.write_all(line.as_bytes())
+        .map_err(|e| format!("写日志失败: {e}"))
+}
+
+/// 简易本地时间戳（避免为一行日志引入 chrono）。
+fn chrono_free_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() as i64;
+    // 仅可读性用途：UTC 秒级时间
+    format!("unix:{secs}")
 }

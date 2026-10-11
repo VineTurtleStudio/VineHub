@@ -2,6 +2,7 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { PluginView } from "../types";
 import { PulsePanel } from "./PulsePanel";
+import { PanelFrame } from "./PanelFrame";
 
 interface Props {
   plugin: PluginView;
@@ -9,17 +10,31 @@ interface Props {
   onLaunch: () => void;
   onOverrideSave: (path: string | null) => void;
   onToggleEnabled: () => void;
+  onNotify: (level: "info" | "error", message: string) => void;
 }
 
-export function PluginDetail({ plugin, busy, onLaunch, onOverrideSave, onToggleEnabled }: Props) {
+export function PluginDetail({
+  plugin,
+  busy,
+  onLaunch,
+  onOverrideSave,
+  onToggleEnabled,
+  onNotify,
+}: Props) {
   const [draft, setDraft] = useState<string>(plugin.entryOverride ?? "");
 
-  // 切换插件时同步草稿
+  // 切换插件时同步草稿与面板选择
   const [lastId, setLastId] = useState(plugin.id);
+  const [activePanel, setActivePanel] = useState<string | null>(null);
   if (lastId !== plugin.id) {
     setLastId(plugin.id);
     setDraft(plugin.entryOverride ?? "");
+    setActivePanel(null);
   }
+
+  const panels = plugin.panels ?? [];
+  const currentPanel =
+    panels.find((p) => p.id === activePanel) ?? panels[0] ?? null;
 
   const pickExe = async () => {
     const path = await open({
@@ -103,7 +118,34 @@ export function PluginDetail({ plugin, busy, onLaunch, onOverrideSave, onToggleE
         </div>
       </div>
 
-      {plugin.kind === "sidecar" && <PulsePanel pluginId={plugin.id} />}
+      {/* P1 交付：vinePulse 原生面板（README P3 明确不迁移） */}
+      {plugin.id === "vine.pulse" && plugin.kind === "sidecar" && (
+        <PulsePanel pluginId={plugin.id} />
+      )}
+
+      {/* P3.1：manifest 面板（iframe + postMessage 桥接） */}
+      {panels.length > 1 && (
+        <div className="panel-tabs">
+          {panels.map((p) => (
+            <button
+              key={p.id}
+              className={
+                "panel-tab" + (currentPanel?.id === p.id ? " active" : "")
+              }
+              onClick={() => setActivePanel(p.id)}
+            >
+              {p.title}
+            </button>
+          ))}
+        </div>
+      )}
+      {currentPanel && (
+        <PanelFrame
+          pluginId={plugin.id}
+          panel={currentPanel}
+          onNotify={onNotify}
+        />
+      )}
 
       <div className="card">
         <h2>生命周期</h2>

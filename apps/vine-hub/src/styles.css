@@ -532,3 +532,34 @@ code {
   display: flex;
   gap: 6px;
 }
+
+/* P3.1 面板 iframe 容器 */
+.panel-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.panel-tab {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.panel-tab.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(91, 157, 255, 0.12);
+}
+
+.panel-frame-card .panel-frame {
+  width: 100%;
+  height: 640px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
