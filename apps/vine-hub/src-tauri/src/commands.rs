@@ -367,50 +367,62 @@ fn ensure_sidecar(state: &crate::AppState, plugin_id: &str) -> Result<Arc<Sideca
     sidecars.spawn(config).map_err(|e| format!("拉起 sidecar 失败: {e}"))
 }
 
-/// 启动扫描（ack+终态双响应；taskId 由 poll 返回）。
-#[tauri::command]
-pub fn scan_start(
-    plugin_id: String,
-    path: String,
-    types: Vec<String>,
-    deep: bool,
-    state: State<'_, crate::AppState>,
-) -> Result<ScanStartView, String> {
-    if path.trim().is_empty() {
-        return Err("请先选择扫描路径".to_string());
-    }
-    if !Path::new(&path).exists() {
-        return Err(format!("路径不存在: {path}"));
-    }
+/// 毫秒级 Unix 时间戳。
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 生成任务记录 id（宿主侧，与插件内部 taskId 区分）。
+fn new_record_id() -> String {
+    format!("task-{}-{:04x}", now_ms(), std::process::id() & 0xffff)
+}
+
+/// 通用任务启动：ensure sidecar → 能力校验 → ack+终态线程 → 登记内存槽与 DB 记录。
+/// 返回宿主记录 id。
+fn start_task_impl(
+    state: &AppState,
+    plugin_id: &str,
+    method_name: &str,
+    params: Value,
+    require_cap: Option<&str>,
+) -> Result<String, String> {
     {
-        let mut scans = state.pulse_scans.lock().unwrap();
-        if let Some(scan) = scans.get(&plugin_id) {
-            let done = scan.terminal.lock().unwrap().is_some();
+        let mut tasks = state.tasks.lock().unwrap();
+        if let Some(slot) = tasks.get(plugin_id) {
+            let done = slot.terminal.lock().unwrap().is_some();
             if !done {
-                return Err("已有扫描任务进行中（可先取消）".to_string());
+                return Err("该插件已有任务进行中（可先取消）".to_string());
             }
-            scans.remove(&plugin_id);
+            tasks.remove(plugin_id);
         }
     }
 
-    let handle = ensure_sidecar(&state, &plugin_id)?;
-    if !handle.info.capabilities.iter().any(|c| c == "scan") {
-        return Err(format!("插件 {} 不支持 scan 能力", plugin_id));
+    let handle = ensure_sidecar(state, plugin_id)?;
+    if let Some(cap) = require_cap {
+        if !handle.info.capabilities.iter().any(|c| c == cap) {
+            return Err(format!("插件 {plugin_id} 不支持 {cap} 能力"));
+        }
     }
 
+    let record_id = new_record_id();
     let task_holder = Arc::new(Mutex::new(None::<String>));
     let terminal = Arc::new(Mutex::new(None::<Result<Value, String>>));
+    let last_progress = Arc::new(Mutex::new(None::<Value>));
 
     {
         let task_holder = task_holder.clone();
         let terminal = terminal.clone();
-        let params = json!({ "path": path, "types": types, "deep": deep });
+        let method_name = method_name.to_string();
+        let thread_params = params.clone();
         std::thread::spawn(move || {
             let result = handle.request_with_ack(
-                method::SCAN_START,
-                Some(params),
+                &method_name,
+                Some(thread_params),
                 Duration::from_secs(10),
-                Duration::from_secs(30 * 60),
+                Duration::from_secs(60 * 60),
             );
             match result {
                 Ok((ack, done)) => {
@@ -426,13 +438,225 @@ pub fn scan_start(
         });
     }
 
-    state.pulse_scans.lock().unwrap().insert(
-        plugin_id,
-        crate::PulseScan {
+    state.tasks.lock().unwrap().insert(
+        plugin_id.to_string(),
+        crate::TaskSlot {
             task_holder,
             terminal,
+            last_progress,
+            method: method_name.to_string(),
+            params: params.clone(),
         },
     );
+
+    let detail = json!({ "params": params }).to_string();
+    let record = vine_host_core::TaskRecord {
+        id: record_id.clone(),
+        plugin_id: plugin_id.to_string(),
+        method: method_name.to_string(),
+        status: vine_host_core::TaskStatus::Running,
+        created_at: now_ms(),
+        updated_at: now_ms(),
+        detail: Some(detail),
+    };
+    {
+        let store = state.store.lock().unwrap();
+        store.insert_task(&record).map_err(storage_err)?;
+    }
+    Ok(record_id)
+}
+
+/// 由终态槽推导任务状态与摘要。
+fn derive_status(slot: &crate::TaskSlot) -> (vine_host_core::TaskStatus, String) {
+    match slot.terminal.lock().unwrap().as_ref() {
+        Some(Ok(v)) => {
+            let cancelled = v.get("cancelled").and_then(|c| c.as_bool()).unwrap_or(false);
+            let elapsed = v.get("elapsedMs").and_then(|e| e.as_u64()).unwrap_or(0);
+            if cancelled {
+                (vine_host_core::TaskStatus::Cancelled, format!("已取消（{elapsed} ms）"))
+            } else {
+                (vine_host_core::TaskStatus::Done, format!("完成（{elapsed} ms）"))
+            }
+        }
+        Some(Err(e)) => {
+            if e.contains("已取消") {
+                (vine_host_core::TaskStatus::Cancelled, "已取消".to_string())
+            } else {
+                (vine_host_core::TaskStatus::Failed, e.clone())
+            }
+        }
+        None => (vine_host_core::TaskStatus::Running, "进行中".to_string()),
+    }
+}
+
+/// 前端可见的任务记录视图。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskView {
+    pub id: String,
+    pub plugin_id: String,
+    pub method: String,
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// 摘要/错误信息。
+    pub detail: Option<String>,
+    /// 进行中任务的最新进度（done/total/msg）。
+    pub progress: Option<Value>,
+    /// 插件内部 taskId。
+    pub plugin_task_id: Option<String>,
+}
+
+/// 任务列表（含终态对账：内存终态→DB；宿主重启后的悬挂 running→failed）。
+#[tauri::command]
+pub fn task_list(
+    plugin_id: Option<String>,
+    state: State<'_, crate::AppState>,
+) -> Result<Vec<TaskView>, String> {
+    let records = {
+        let store = state.store.lock().unwrap();
+        store
+            .list_tasks(plugin_id.as_deref())
+            .map_err(storage_err)?
+    };
+
+    let mut tasks = state.tasks.lock().unwrap();
+    let mut views = Vec::with_capacity(records.len());
+    for mut rec in records {
+        if rec.status == vine_host_core::TaskStatus::Running {
+            if let Some(slot) = tasks.get(&rec.plugin_id) {
+                let (status, summary) = derive_status(slot);
+                if status != vine_host_core::TaskStatus::Running {
+                    let detail = json!({ "summary": summary }).to_string();
+                    {
+                        let store = state.store.lock().unwrap();
+                        let _ = store.update_task(&rec.id, status, now_ms(), Some(&detail));
+                    }
+                    rec.status = status;
+                    rec.detail = Some(detail);
+                    rec.updated_at = now_ms();
+                    tasks.remove(&rec.plugin_id);
+                }
+            } else {
+                // 内存槽不存在（宿主重启或未启动过）：标记失败，可重试
+                let detail = "{ \"summary\": \"宿主重启，任务丢失，可重试\" }".to_string();
+                {
+                    let store = state.store.lock().unwrap();
+                    let _ = store.update_task(
+                        &rec.id,
+                        vine_host_core::TaskStatus::Failed,
+                        now_ms(),
+                        Some(&detail),
+                    );
+                }
+                rec.status = vine_host_core::TaskStatus::Failed;
+                rec.detail = Some(detail);
+                rec.updated_at = now_ms();
+            }
+        }
+        let (progress, plugin_task_id) = match tasks.get(&rec.plugin_id) {
+            Some(slot) if rec.status == vine_host_core::TaskStatus::Running => {
+                let tid = slot.task_holder.lock().unwrap().clone();
+                let p = slot.last_progress.lock().unwrap().clone();
+                (p, tid)
+            }
+            _ => (None, None),
+        };
+        views.push(TaskView {
+            id: rec.id,
+            plugin_id: rec.plugin_id,
+            method: rec.method,
+            status: rec.status.as_str().to_string(),
+            created_at: rec.created_at,
+            updated_at: rec.updated_at,
+            detail: rec.detail,
+            progress,
+            plugin_task_id,
+        });
+    }
+    Ok(views)
+}
+
+/// 按宿主记录 id 取消任务。
+#[tauri::command]
+pub fn task_cancel_id(
+    task_id: String,
+    state: State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let record = {
+        let store = state.store.lock().unwrap();
+        store.get_task(&task_id).map_err(storage_err)?
+    }
+    .ok_or_else(|| format!("任务不存在: {task_id}"))?;
+
+    let tasks = state.tasks.lock().unwrap();
+    let Some(slot) = tasks.get(&record.plugin_id) else {
+        return Err("任务已不在运行".to_string());
+    };
+    let Some(plugin_task_id) = slot.task_holder.lock().unwrap().clone() else {
+        return Err("任务尚未确认，请稍后再试".to_string());
+    };
+    drop(tasks);
+
+    let sidecars = state.sidecars.lock().unwrap();
+    let handle = sidecars
+        .get(&record.plugin_id)
+        .ok_or_else(|| "sidecar 未运行".to_string())?;
+    handle
+        .notify(
+            method::TASK_CANCEL,
+            Some(json!({ "taskId": plugin_task_id })),
+        )
+        .map_err(|e| format!("发送取消失败: {e}"))
+}
+
+/// 重试任务：读取记录中的方法与参数快照，重新启动；返回新记录 id。
+#[tauri::command]
+pub fn task_retry(
+    task_id: String,
+    state: State<'_, crate::AppState>,
+) -> Result<String, String> {
+    let record = {
+        let store = state.store.lock().unwrap();
+        store.get_task(&task_id).map_err(storage_err)?
+    }
+    .ok_or_else(|| format!("任务不存在: {task_id}"))?;
+
+    if record.status == vine_host_core::TaskStatus::Running {
+        return Err("任务仍在进行中，无需重试".to_string());
+    }
+
+    let params = record
+        .detail
+        .as_deref()
+        .and_then(|d| serde_json::from_str::<Value>(d).ok())
+        .and_then(|v| v.get("params").cloned())
+        .unwrap_or(Value::Null);
+    if params.is_null() {
+        return Err("该任务缺少参数快照，无法重试".to_string());
+    }
+
+    let new_id = start_task_impl(&state, &record.plugin_id, &record.method, params, None)?;
+    Ok(new_id)
+}
+
+/// 启动扫描（ack+终态双响应；taskId 由 poll 返回）。
+#[tauri::command]
+pub fn scan_start(
+    plugin_id: String,
+    path: String,
+    types: Vec<String>,
+    deep: bool,
+    state: State<'_, crate::AppState>,
+) -> Result<ScanStartView, String> {
+    if path.trim().is_empty() {
+        return Err("请先选择扫描路径".to_string());
+    }
+    if !Path::new(&path).exists() {
+        return Err(format!("路径不存在: {path}"));
+    }
+    let params = json!({ "path": path, "types": types, "deep": deep });
+    start_task_impl(&state, &plugin_id, method::SCAN_START, params, Some("scan"))?;
     Ok(ScanStartView { started: true })
 }
 
@@ -460,8 +684,8 @@ pub fn scan_poll(
         }
     };
 
-    let scans = state.pulse_scans.lock().unwrap();
-    let Some(scan) = scans.get(&plugin_id) else {
+    let tasks = state.tasks.lock().unwrap();
+    let Some(slot) = tasks.get(&plugin_id) else {
         return Ok(ScanPollView {
             notifications,
             task_id: None,
@@ -472,8 +696,12 @@ pub fn scan_poll(
         });
     };
 
-    let task_id = scan.task_holder.lock().unwrap().clone();
-    let (terminal, error) = match scan.terminal.lock().unwrap().as_ref() {
+    if let Some(last) = notifications.last() {
+        *slot.last_progress.lock().unwrap() = Some(last.clone());
+    }
+
+    let task_id = slot.task_holder.lock().unwrap().clone();
+    let (terminal, error) = match slot.terminal.lock().unwrap().as_ref() {
         Some(Ok(v)) => (Some(v.clone()), None),
         Some(Err(e)) => (None, Some(e.clone())),
         None => (None, None),
@@ -496,11 +724,11 @@ pub fn scan_cancel(
     state: State<'_, crate::AppState>,
 ) -> Result<(), String> {
     let task_id = {
-        let scans = state.pulse_scans.lock().unwrap();
-        let Some(scan) = scans.get(&plugin_id) else {
+        let tasks = state.tasks.lock().unwrap();
+        let Some(slot) = tasks.get(&plugin_id) else {
             return Err("没有进行中的扫描".to_string());
         };
-        let Some(task_id) = scan.task_holder.lock().unwrap().clone() else {
+        let Some(task_id) = slot.task_holder.lock().unwrap().clone() else {
             return Err("任务尚未确认，请稍后再试".to_string());
         };
         task_id
@@ -524,7 +752,7 @@ pub fn scan_reset(
     plugin_id: String,
     state: State<'_, crate::AppState>,
 ) -> Result<(), String> {
-    state.pulse_scans.lock().unwrap().remove(&plugin_id);
+    state.tasks.lock().unwrap().remove(&plugin_id);
     // 顺带回收通知残留
     if let Some(handle) = state.sidecars.lock().unwrap().get(&plugin_id) {
         while handle.try_recv_notification().is_some() {}

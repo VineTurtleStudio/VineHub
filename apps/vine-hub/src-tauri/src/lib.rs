@@ -10,12 +10,17 @@ use serde_json::Value;
 use tauri::Manager;
 use vine_host_core::{PluginRegistry, SidecarManager, Store};
 
-/// 进行中的 vinePulse 扫描（每插件至多一个）。
-pub struct PulseScan {
+/// 进行中的 sidecar 任务（每插件至多一个）。
+pub struct TaskSlot {
     /// 后台线程确认 taskId 后写入。
     pub task_holder: Arc<Mutex<Option<String>>>,
     /// ack+终态双响应的终态槽。
     pub terminal: Arc<Mutex<Option<Result<Value, String>>>>,
+    /// 最近一条 task.progress 通知（task_list 展示用）。
+    pub last_progress: Arc<Mutex<Option<Value>>>,
+    /// 发起时的 RPC 方法与参数快照（任务中心重试用）。
+    pub method: String,
+    pub params: Value,
 }
 
 /// 宿主全局状态。
@@ -23,7 +28,8 @@ pub struct AppState {
     pub registry: Mutex<PluginRegistry>,
     pub store: Mutex<Store>,
     pub sidecars: Mutex<SidecarManager>,
-    pub pulse_scans: Mutex<HashMap<String, PulseScan>>,
+    /// key = plugin_id（每插件至多一个活动任务）。
+    pub tasks: Mutex<HashMap<String, TaskSlot>>,
     /// sidecar stderr 日志落盘目录（`{data_dir}/logs`）。
     pub logs_dir: PathBuf,
 }
@@ -69,7 +75,7 @@ pub fn run() {
                 registry: Mutex::new(registry),
                 store: Mutex::new(store),
                 sidecars: Mutex::new(SidecarManager::new()),
-                pulse_scans: Mutex::new(HashMap::new()),
+                tasks: Mutex::new(HashMap::new()),
                 logs_dir,
             });
             Ok(())
@@ -87,6 +93,9 @@ pub fn run() {
             commands::scan_cancel,
             commands::scan_reset,
             commands::sidecar_status,
+            commands::task_list,
+            commands::task_cancel_id,
+            commands::task_retry,
         ])
         .run(tauri::generate_context!())
         .expect("error while running VineHub");

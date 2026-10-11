@@ -12,8 +12,12 @@ import {
 import type { PluginView } from "./types";
 import { PluginDetail } from "./components/PluginDetail";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { TaskCenter } from "./components/TaskCenter";
 
-type Page = { kind: "plugin"; id: string } | { kind: "settings" };
+type Page =
+  | { kind: "plugin"; id: string }
+  | { kind: "settings" }
+  | { kind: "tasks" };
 
 export default function App() {
   const [plugins, setPlugins] = useState<PluginView[]>([]);
@@ -160,6 +164,12 @@ export default function App() {
             导入插件包…
           </button>
           <button
+            className={"btn ghost" + (page.kind === "tasks" ? " active" : "")}
+            onClick={() => setPage({ kind: "tasks" })}
+          >
+            任务中心
+          </button>
+          <button
             className={"btn ghost" + (page.kind === "settings" ? " active" : "")}
             onClick={() => setPage({ kind: "settings" })}
           >
@@ -192,6 +202,8 @@ export default function App() {
             onSelectPlugin={(id) => setPage({ kind: "plugin", id })}
           />
         )}
+
+        {page.kind === "tasks" && <TaskCenter plugins={plugins} />}
 
         {selected && (
           <PluginDetail

@@ -65,3 +65,24 @@ export interface ScanTerminal {
   elapsedMs: number;
   reports: ScanReport[];
 }
+
+export type TaskStatus = "pending" | "running" | "done" | "failed" | "cancelled";
+
+export interface TaskProgress {
+  taskId: string;
+  done: number;
+  total: number;
+  msg?: string | null;
+}
+
+export interface TaskView {
+  id: string;
+  pluginId: string;
+  method: string;
+  status: TaskStatus;
+  createdAt: number;
+  updatedAt: number;
+  detail: string | null;
+  progress: TaskProgress | null;
+  pluginTaskId: string | null;
+}

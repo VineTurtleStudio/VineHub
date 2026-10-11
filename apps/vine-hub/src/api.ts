@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ImportResult, PluginView, ScanPoll, ScanStartResult } from "./types";
+import type {
+  ImportResult,
+  PluginView,
+  ScanPoll,
+  ScanStartResult,
+  TaskView,
+} from "./types";
 
 export function listPlugins(): Promise<PluginView[]> {
   return invoke<PluginView[]>("list_plugins");
@@ -63,4 +69,16 @@ export function scanReset(pluginId: string): Promise<void> {
 
 export function sidecarStatus(pluginId: string): Promise<Record<string, unknown>> {
   return invoke("sidecar_status", { pluginId });
+}
+
+export function taskList(pluginId?: string): Promise<TaskView[]> {
+  return invoke<TaskView[]>("task_list", { pluginId: pluginId ?? null });
+}
+
+export function taskCancelId(taskId: string): Promise<void> {
+  return invoke<void>("task_cancel_id", { taskId });
+}
+
+export function taskRetry(taskId: string): Promise<string> {
+  return invoke<string>("task_retry", { taskId });
 }

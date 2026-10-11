@@ -481,3 +481,54 @@ code {
   color: var(--text-dim);
   font-size: 12px;
 }
+
+.badge.running {
+  background: rgba(91, 157, 255, 0.15);
+  border-color: rgba(91, 157, 255, 0.5);
+  color: var(--accent);
+  animation: badge-pulse 1.4s ease-in-out infinite;
+}
+
+.badge.danger {
+  background: rgba(240, 113, 120, 0.15);
+  border-color: rgba(240, 113, 120, 0.5);
+  color: var(--danger);
+}
+
+@keyframes badge-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.btn.small {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.task-table td {
+  vertical-align: middle;
+}
+
+.task-id {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.task-summary {
+  min-width: 220px;
+}
+
+.task-summary .progress-wrap {
+  margin-bottom: 0;
+}
+
+.task-detail {
+  color: var(--text-dim);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.task-actions {
+  display: flex;
+  gap: 6px;
+}
