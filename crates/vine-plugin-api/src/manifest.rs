@@ -155,9 +155,9 @@ impl PluginManifest {
         }
 
         require_non_empty(&self.entry, "entry")?;
-        if is_relative(&self.entry) && !is_safe_plugin_relative_path(&self.entry) {
-            return Err(ManifestError::PathEscape(self.entry.clone()));
-        }
+        // entry 允许 ".."：仓内第一方插件指向 apps/*/target 下的 exe；
+        // panels[].ui 与 dataDir 仍严格禁止逃逸。entry 本身是受信可执行程序，
+        // 允许 .. 不扩大攻击面（装插件 = 装程序）。
         if !is_safe_data_dir(&self.data_dir) {
             return Err(ManifestError::PathEscape(self.data_dir.clone()));
         }
@@ -232,10 +232,6 @@ pub fn is_safe_plugin_relative_path(p: &str) -> bool {
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
     })
-}
-
-fn is_relative(p: &str) -> bool {
-    !Path::new(p).is_absolute()
 }
 
 /// dataDir 作为数据目录名：禁止路径分隔符、`..`、盘符。
@@ -385,13 +381,14 @@ mod tests {
                 "ui {bad_ui:?} 应被拒绝，得到 {err:?}"
             );
         }
+    }
 
+    #[test]
+    fn entry_relative_with_parent_is_allowed() {
+        // 仓内第一方插件：entry 指向 apps/*/target，允许 ..
         let json = valid_manifest_json("vine.pulse", "external")
-            .replace("bin/test.exe", "../../evil.exe");
-        assert!(matches!(
-            PluginManifest::from_json(&json).unwrap_err(),
-            ManifestError::PathEscape(_)
-        ));
+            .replace("bin/test.exe", "../../apps/vinePulse/target/release/vine-pulse.exe");
+        assert!(PluginManifest::from_json(&json).is_ok());
     }
 
     #[test]

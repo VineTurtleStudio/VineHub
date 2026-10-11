@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>vineCurator - 本地媒体资产管理器</title>
+    <link rel="stylesheet" href="/src/styles/main.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <div class="brand">vineCurator</div>
+        <nav id="main-nav">
+          <button type="button" class="nav-btn active" data-cmd="view-browse" data-keys="Ctrl+1">
+            浏览
+          </button>
+          <button type="button" class="nav-btn" data-cmd="view-settings" data-keys="Ctrl+2">
+            设置
+          </button>
+          <button type="button" class="nav-btn" data-cmd="focus-search" data-keys="Ctrl+Shift+F">
+            搜索
+          </button>
+          <button type="button" class="nav-btn" data-cmd="palette" data-keys="Ctrl+K">
+            命令面板
+          </button>
+        </nav>
+        <div class="topbar-right">
+          <button type="button" id="job-chip" hidden title="任务进行中 · 点击查看进度">
+            <span class="job-chip-dot" aria-hidden="true"></span>
+            <span id="job-chip-label"></span>
+            <span class="job-chip-bar" aria-hidden="true"><span id="job-chip-fill"></span></span>
+          </button>
+          <button
+            type="button"
+            id="theme-toggle"
+            title="切换深浅主题"
+            aria-label="切换深浅主题"
+          ></button>
+          <button type="button" id="user-chip" class="user-chip" title="账号（点击打开用户设置）">
+            未登录
+          </button>
+          <div class="topbar-status" id="db-status">连接中…</div>
+        </div>
+      </header>
+
+      <!-- 额外命令源（data-keys 唯一来源；无快捷键的命令放这里） -->
+      <div id="command-source" hidden>
+        <button type="button" data-cmd="refresh-view" data-label="刷新当前视图">刷新视图</button>
+        <button type="button" data-cmd="cancel-job" data-label="取消当前任务">取消任务</button>
+        <button type="button" data-cmd="reprobe" data-label="重新探测外部工具">重新探测工具</button>
+        <button type="button" data-cmd="goto-top" data-label="列表跳到顶部">跳到顶部</button>
+        <button type="button" data-cmd="reload-list" data-label="重新加载列表">重新加载列表</button>
+        <button type="button" data-cmd="category-new" data-label="新建分类">新建分类</button>
+        <button type="button" data-cmd="category-rename" data-label="重命名选中分类">
+          重命名分类
+        </button>
+        <button type="button" data-cmd="category-move" data-label="移动选中分类">移动分类</button>
+        <button type="button" data-cmd="category-delete" data-label="删除选中分类">删除分类</button>
+        <button type="button" data-cmd="save-collection" data-label="另存为智能集合">
+          另存为集合
+        </button>
+        <button type="button" data-cmd="merge-tags" data-label="合并标签">合并标签</button>
+      </div>
+
+      <main id="content">
+        <!-- 浏览视图：三栏 -->
+        <div id="view-browse" class="browse-layout">
+          <aside id="tree-panel" style="width: 220px">
+            <div id="tree-toolbar">
+              <button
+                type="button"
+                class="btn-ghost sm"
+                id="cat-new"
+                title="新建分类（选中分类下建子级）"
+              >
+                ＋分类
+              </button>
+              <button type="button" class="btn-ghost sm" id="cat-rename" title="重命名选中分类">
+                重命名
+              </button>
+              <button type="button" class="btn-ghost sm" id="cat-move" title="移动选中分类">
+                移动
+              </button>
+              <button
+                type="button"
+                class="btn-ghost sm danger"
+                id="cat-delete"
+                title="删除选中分类"
+              >
+                删除
+              </button>
+            </div>
+            <div id="tree-body"></div>
+          </aside>
+          <div class="splitter" data-split="tree" title="拖动调整宽度"></div>
+
+          <section id="list-panel">
+            <div id="list-toolbar">
+              <input
+                type="search"
+                id="search-input"
+                placeholder="搜索文件名 / 路径…（Ctrl+Shift+F）"
+                autocomplete="off"
+              />
+              <span id="list-count" class="hint"></span>
+              <span id="grid-sort-bar" hidden>
+                <select id="grid-sort" title="排序方式"></select>
+                <button type="button" id="grid-sort-dir" class="btn-ghost sm" title="切换升 / 降序">
+                  ↓
+                </button>
+              </span>
+              <div id="view-toggle" role="group" aria-label="视图切换">
+                <button type="button" id="view-list" class="view-btn" title="列表视图">
+                  <svg
+                    viewBox="0 0 16 16"
+                    width="14"
+                    height="14"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                  >
+                    <path d="M5.5 4h8M5.5 8h8M5.5 12h8" />
+                    <circle cx="2.7" cy="4" r="1" fill="currentColor" stroke="none" />
+                    <circle cx="2.7" cy="8" r="1" fill="currentColor" stroke="none" />
+                    <circle cx="2.7" cy="12" r="1" fill="currentColor" stroke="none" />
+                  </svg>
+                </button>
+                <button type="button" id="view-grid" class="view-btn" title="网格视图">
+                  <svg
+                    viewBox="0 0 16 16"
+                    width="14"
+                    height="14"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                  >
+                    <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" />
+                    <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
+                    <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
+                    <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div id="batch-bar" hidden>
+              <span id="batch-count"></span>
+              <input type="text" id="batch-tags" placeholder="标签，逗号分隔…" autocomplete="off" />
+              <button type="button" class="btn sm" id="batch-tag-apply">打标</button>
+              <input
+                type="text"
+                id="batch-cat"
+                placeholder="分类路径，如 音乐/摇滚…"
+                autocomplete="off"
+              />
+              <button type="button" class="btn sm" id="batch-cat-apply">归类</button>
+              <select id="batch-status" title="批量设置状态">
+                <option value="">状态…</option>
+                <option value="inbox">收件箱</option>
+                <option value="unwatched">未看</option>
+                <option value="reading">在读</option>
+                <option value="done">完成</option>
+                <option value="dropped">弃坑</option>
+              </select>
+              <button type="button" class="btn sm" id="batch-status-apply">设状态</button>
+              <button type="button" class="btn-ghost sm" id="batch-tag-clear">取消选择</button>
+            </div>
+            <div id="list-header"></div>
+            <div id="list-scroll" tabindex="0">
+              <div id="list-spacer">
+                <div id="list-rows"></div>
+              </div>
+              <div id="list-empty" class="empty" hidden>无匹配条目</div>
+            </div>
+          </section>
+          <div class="splitter" data-split="detail" title="拖动调整宽度"></div>
+
+          <aside id="detail-panel" style="width: 300px">
+            <div id="detail-body"><p class="hint">选择条目查看详情</p></div>
+          </aside>
+        </div>
+
+        <!-- 设置视图 -->
+        <div id="view-settings" hidden>
+          <nav id="settings-nav">
+            <button type="button" data-target="roots-panel">根目录</button>
+            <button type="button" data-target="derived-panel">派生目录</button>
+            <button type="button" data-target="db-panel">数据库</button>
+            <button type="button" data-target="meta-panel">元数据</button>
+            <button type="button" data-target="tools-panel">外部工具</button>
+            <button type="button" data-target="backup-panel">备份</button>
+            <button type="button" data-target="port-panel">导入导出</button>
+            <button type="button" data-target="rules-panel">规则</button>
+            <button type="button" data-target="autocat-panel">自动分类</button>
+            <button type="button" data-target="users-panel">用户</button>
+            <button type="button" data-target="audit-panel">审计</button>
+            <button type="button" data-target="dupes-panel">重复检测</button>
+            <button type="button" data-target="ocr-panel">OCR</button>
+          </nav>
+          <section class="panel span-all" id="roots-panel">
+            <h2 class="panel-title">媒体根目录</h2>
+            <form id="root-add-form" class="row-form">
+              <label class="grow">
+                <span>目录</span>
+                <input type="text" id="root-path" readonly placeholder="选择目录…" />
+              </label>
+              <button type="button" class="btn-ghost" id="root-browse">浏览…</button>
+              <label>
+                <span>标签（可选）</span>
+                <input type="text" id="root-label" placeholder="外置硬盘 A" />
+              </label>
+              <button type="submit" class="btn">添加</button>
+            </form>
+            <table class="data-table" id="roots-table">
+              <thead>
+                <tr>
+                  <th>路径</th>
+                  <th>标签</th>
+                  <th class="num">条目</th>
+                  <th class="ops ops-wide">操作</th>
+                </tr>
+              </thead>
+              <tbody id="roots-body"></tbody>
+            </table>
+            <p class="hint">
+              只对外置目录建立<b>只读</b>索引，绝不改动原始文件；「删除」仅清除索引，磁盘文件保持原样。盘符变化用「重定向」，条目按相对路径保留。
+            </p>
+          </section>
+
+          <section class="panel" id="derived-panel">
+            <h2 class="panel-title">派生数据目录</h2>
+            <form id="derived-form" class="row-form">
+              <label class="grow">
+                <span>封面 / 缩略图输出</span>
+                <input type="text" id="derived-dir" placeholder="未设置" />
+              </label>
+              <button type="button" class="btn-ghost" id="derived-browse">浏览…</button>
+              <button type="submit" class="btn">保存</button>
+            </form>
+            <p class="hint">
+              派生图写入 &lt;派生目录&gt;/thumbs/，可整目录删除重建，不污染媒体库。
+            </p>
+          </section>
+
+          <section class="panel" id="db-panel">
+            <h2 class="panel-title">数据库</h2>
+            <div class="kv-row">
+              <span class="kv-key">catalog.sqlite</span>
+              <code id="db-path">…</code>
+            </div>
+            <p class="hint">
+              固定本地 AppData（WAL 安全，不放外置盘）；本地 SQLite 为唯一真相源，离线可用。
+            </p>
+          </section>
+
+          <section class="panel span-all" id="meta-panel">
+            <h2 class="panel-title">元数据</h2>
+            <form id="meta-form" class="row-form">
+              <label>
+                <span>范围</span>
+                <select id="meta-scope">
+                  <option value="">全部根目录</option>
+                </select>
+              </label>
+              <button type="button" class="btn" id="meta-probe">探测（ffprobe / exiftool）</button>
+              <button type="button" class="btn-ghost" id="meta-beets">beets 导入</button>
+              <button type="button" class="btn-ghost" id="meta-calibre">Calibre 导入</button>
+            </form>
+            <form id="meta-lib-form" class="row-form">
+              <label class="grow">
+                <span>beets library.db</span>
+                <input type="text" id="beets-db-path" placeholder="D:\beets\library.db" />
+              </label>
+              <button type="button" class="btn-ghost" id="beets-browse">浏览…</button>
+              <label class="grow">
+                <span>Calibre 书库目录</span>
+                <input type="text" id="calibre-lib-path" placeholder="D:\Calibre Library" />
+              </label>
+              <button type="button" class="btn-ghost" id="calibre-browse">浏览…</button>
+              <button type="submit" class="btn">保存路径</button>
+            </form>
+            <p class="hint">
+              探测只读调用 ffprobe / exiftool（video/music → ffprobe，book/comic → exiftool），JSON
+              落入扩展表；beets / Calibre 以只读方式打开本地库按绝对路径匹配回填，绝不写对方库。
+            </p>
+          </section>
+
+          <section class="panel span-all" id="tools-panel">
+            <h2 class="panel-title">
+              <span>外部工具</span>
+              <button type="button" class="btn-ghost" id="reprobe">重新探测</button>
+            </h2>
+            <div id="tool-list" class="tool-list"></div>
+            <p class="hint">
+              探测不到时可手动指定绝对路径（如 D:\tools\ffprobe.exe），保存后立即生效；留空恢复 PATH
+              自动探测。
+            </p>
+          </section>
+
+          <section class="panel span-all" id="backup-panel">
+            <h2 class="panel-title">
+              <span>备份</span>
+              <span id="backup-last" class="dupe-badge">…</span>
+              <button type="button" class="btn" id="backup-run">立即备份</button>
+            </h2>
+            <form id="backup-form" class="row-form">
+              <label>
+                <span>间隔（小时，0=仅手动）</span>
+                <input type="number" id="backup-interval" min="0" value="0" />
+              </label>
+              <label>
+                <span>保留快照数</span>
+                <input type="number" id="backup-keep" min="1" value="7" />
+              </label>
+              <label class="grow">
+                <span>快照目录（空=派生目录 backups/）</span>
+                <input type="text" id="backup-dir" placeholder="D:\backup\vinecurator" />
+              </label>
+              <label class="grow">
+                <span>restic 仓库（空=不推远端）</span>
+                <input type="text" id="restic-repo" placeholder="sftp:backup@nas:/media-backup" />
+              </label>
+              <label class="grow">
+                <span>restic 密码文件（可选）</span>
+                <input type="text" id="restic-password-file" placeholder="D:\secrets\restic.pw" />
+              </label>
+              <button type="submit" class="btn">保存</button>
+            </form>
+            <p class="hint">
+              快照 = catalog.sqlite 的 <code>VACUUM INTO</code> 在线一致副本（含 FTS 索引），落
+              <code>backups/catalog-&lt;时间戳&gt;.sqlite</code
+              >，按保留数自动清理；间隔到点由应用内定时器触发（需应用保持打开）。配置 restic
+              仓库后每次备份追加执行 <code>restic backup</code> 推送快照目录，restic
+              缺失/失败自动降级（本地快照不受影响）。媒体文件不进快照——restic 仓库可另行指向媒体盘。
+            </p>
+          </section>
+
+          <section class="panel span-all" id="port-panel">
+            <h2 class="panel-title">
+              <span>标签 / 分类导入导出</span>
+              <button type="button" class="btn-ghost" id="port-export">导出 JSON</button>
+              <button type="button" class="btn" id="port-import">导入 JSON</button>
+            </h2>
+            <p class="hint">
+              导出分类树（物化路径）与标签词表/别名的 JSON 快照，可在不同库之间迁移；导入为增量
+              upsert——缺失祖先分类自动补建、同名项更新、冲突别名跳过并在结果里列出。不触碰条目关联（item_tags），只动词表与分类树。
+            </p>
+          </section>
+
+          <section class="panel span-all" id="rules-panel">
+            <h2 class="panel-title">
+              <span>规则自动打标</span>
+              <button type="button" class="btn-ghost" id="rule-new">＋ 新建</button>
+              <button type="button" class="btn" id="rule-run">立即运行</button>
+            </h2>
+            <form id="rule-form" class="row-form" hidden>
+              <input type="hidden" id="rule-id" />
+              <label>
+                <span>名称</span>
+                <input type="text" id="rule-name" placeholder="未读的电子书" />
+              </label>
+              <label>
+                <span>优先级</span>
+                <input type="number" id="rule-priority" value="0" />
+              </label>
+              <label class="check-label">
+                <input type="checkbox" id="rule-enabled" checked />
+                <span>启用</span>
+              </label>
+              <label class="grow">
+                <span>条件（smart 过滤 JSON）</span>
+                <input
+                  type="text"
+                  id="rule-conditions"
+                  placeholder='{"all":[{"field":"type","op":"eq","value":"book"}]}'
+                />
+              </label>
+              <label class="grow">
+                <span>动作（JSON 数组）</span>
+                <input
+                  type="text"
+                  id="rule-actions"
+                  placeholder='[{"op":"add_tag","value":"未读"}]'
+                />
+              </label>
+              <button type="submit" class="btn">保存</button>
+              <button type="button" class="btn-ghost" id="rule-cancel">取消</button>
+            </form>
+            <table class="data-table" id="rules-table">
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>优先级</th>
+                  <th>状态</th>
+                  <th>条件</th>
+                  <th>动作</th>
+                  <th class="ops ops-wide">操作</th>
+                </tr>
+              </thead>
+              <tbody id="rules-body"></tbody>
+            </table>
+            <p class="hint">
+              条件走字段白名单（type/status/rating/year/tag/category…），值全部参数绑定不拼接；动作支持
+              <code>add_tag</code> 与
+              <code>set_category</code>（物化路径，自动补建祖先）。规则命中写
+              <code>source='rule'</code>，不会覆盖已有的人工打标/归类；扫描 /
+              元数据导入完成后自动运行（可取消）。
+            </p>
+          </section>
+
+          <section class="panel span-all" id="autocat-panel">
+            <h2 class="panel-title">
+              <span>自动分类（目录结构镜像）</span>
+              <button type="button" class="btn" id="autocat-run">立即整理</button>
+            </h2>
+            <form id="autocat-form" class="row-form">
+              <label>
+                <span>目录层级（0 = 关闭）</span>
+                <input type="number" id="autocat-depth" min="0" max="5" step="1" value="1" />
+              </label>
+              <button type="submit" class="btn">保存</button>
+            </form>
+            <p class="hint">
+              按每个条目父目录相对根目录的前 N 层文件夹自动建立/复用分类树并归类（如
+              <code>Rock/Queen/Album/01.flac</code>、层级 2 → 分类
+              <code>Rock/Queen</code>）。自动关联
+              <code>source='auto'</code
+              >：重跑只更新自动关联，绝不覆盖手动/规则归类；根目录下散文件不归类。扫描完成后自动先跑本任务再跑规则。
+            </p>
+          </section>
+
+          <section class="panel span-all" id="users-panel">
+            <h2 class="panel-title">
+              <span>用户与登录</span>
+              <button type="button" class="btn-ghost" id="user-logout" hidden>退出登录</button>
+            </h2>
+            <p class="hint" id="session-info">未登录（本地模式）</p>
+            <form id="setup-admin-form" class="row-form" hidden>
+              <label>
+                <span>初始管理员用户名</span>
+                <input type="text" id="setup-admin-name" autocomplete="off" />
+              </label>
+              <label>
+                <span>密码（≥6 位）</span>
+                <input type="password" id="setup-admin-pw" autocomplete="new-password" />
+              </label>
+              <button type="submit" class="btn">创建并登录</button>
+            </form>
+            <form id="login-form" class="row-form">
+              <label>
+                <span>用户名</span>
+                <input type="text" id="login-name" autocomplete="off" />
+              </label>
+              <label>
+                <span>密码</span>
+                <input type="password" id="login-pw" autocomplete="current-password" />
+              </label>
+              <button type="submit" class="btn">登录</button>
+            </form>
+            <form id="change-pw-form" class="row-form" hidden>
+              <label>
+                <span>旧密码</span>
+                <input type="password" id="old-pw" autocomplete="current-password" />
+              </label>
+              <label>
+                <span>新密码（≥6 位）</span>
+                <input type="password" id="new-pw" autocomplete="new-password" />
+              </label>
+              <button type="submit" class="btn">修改密码</button>
+            </form>
+            <form id="create-user-form" class="row-form">
+              <label>
+                <span>新用户名</span>
+                <input type="text" id="new-user-name" autocomplete="off" />
+              </label>
+              <label>
+                <span>密码</span>
+                <input type="password" id="new-user-pw" autocomplete="new-password" />
+              </label>
+              <label>
+                <span>角色</span>
+                <select id="new-user-role">
+                  <option value="viewer">viewer（只读）</option>
+                  <option value="editor">editor（编辑）</option>
+                  <option value="admin">admin（管理）</option>
+                </select>
+              </label>
+              <button type="submit" class="btn">创建用户</button>
+            </form>
+            <table class="data-table" id="users-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>用户名</th>
+                  <th>角色</th>
+                  <th>创建时间</th>
+                  <th class="ops ops-wide">操作</th>
+                </tr>
+              </thead>
+              <tbody id="users-body"></tbody>
+            </table>
+            <p class="hint">
+              本地 admin 登录（Argon2 哈希，会话驻留内存）；角色门禁随远端接口（阶段三
+              collab）落地。所有写操作都会记入下方审计日志，密码绝不入账。
+            </p>
+          </section>
+
+          <section class="panel span-all" id="audit-panel">
+            <h2 class="panel-title">
+              <span>审计日志</span>
+              <select id="audit-entity">
+                <option value="">全部实体</option>
+                <option value="root">root</option>
+                <option value="item">item</option>
+                <option value="category">category</option>
+                <option value="tag">tag</option>
+                <option value="collection">collection</option>
+                <option value="rule">rule</option>
+                <option value="settings">settings</option>
+                <option value="job">job</option>
+                <option value="thumb">thumb</option>
+                <option value="user">user</option>
+                <option value="session">session</option>
+              </select>
+              <button type="button" class="btn-ghost" id="audit-refresh">刷新</button>
+            </h2>
+            <table class="data-table" id="audit-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>用户</th>
+                  <th>动作</th>
+                  <th>实体</th>
+                  <th>对象</th>
+                  <th>详情</th>
+                </tr>
+              </thead>
+              <tbody id="audit-body"></tbody>
+            </table>
+            <p class="hint">
+              写命令与后台任务（扫描 / 哈希 / 元数据 / 规则）100% 落账，按任务汇总不逐文件刷屏。
+            </p>
+          </section>
+
+          <section class="panel span-all" id="dupes-panel">
+            <h2 class="panel-title">
+              <span>重复检测</span>
+              <button type="button" class="btn" id="dupe-run">补部分哈希</button>
+              <button type="button" class="btn-ghost" id="dupe-refresh">刷新报告</button>
+            </h2>
+            <div id="dupe-list" class="dupe-list"></div>
+            <p class="hint">
+              size 分组 → 可疑组补部分哈希（sha256：文件长度 + 头 1MiB + 尾 1MiB）→
+              报告相同组；完整哈希一致的标为「已确认」。只读报告，绝不删除或修改原始媒体；需要确认时可先跑完整哈希任务。
+            </p>
+          </section>
+
+          <section class="panel span-all" id="ocr-panel">
+            <h2 class="panel-title">
+              <span>OCR 队列</span>
+              <span id="ocr-count" class="dupe-badge">…</span>
+              <button type="button" class="btn" id="ocr-run">开始 OCR</button>
+              <button type="button" class="btn-ghost" id="ocr-refresh">刷新</button>
+            </h2>
+            <p class="hint">
+              对 book 类 PDF 调用 OCRmyPDF（依赖
+              Tesseract）：识别文本写入数据库并进全文索引，派生可搜索 PDF 落派生目录
+              <code>ocr/</code>；<b>原始文件永不修改</b>。文件 mtime
+              变化自动重新识别；失败可重试。工具路径与语言（settings 键 <code>ocr_lang</code>，默认
+              eng）在设置页工具面板配置。
+            </p>
+          </section>
+        </div>
+
+        <section class="panel span-all" id="job-panel" hidden>
+          <h2 class="panel-title">
+            <span>任务进度</span>
+            <button type="button" class="btn-ghost danger" id="job-cancel">取消</button>
+          </h2>
+          <div id="job-bar" class="job-bar">
+            <div id="job-fill" class="job-fill"></div>
+          </div>
+          <div id="job-status" class="job-status">…</div>
+        </section>
+      </main>
+
+      <!-- 命令面板 -->
+      <div id="palette" hidden>
+        <div class="palette-box">
+          <input type="text" id="palette-input" placeholder="输入命令…" autocomplete="off" />
+          <div id="palette-list" class="palette-list"></div>
+        </div>
+      </div>
+
+      <div id="toast" class="toast-stack"></div>
+
+      <!-- 拖放文件夹 → 添加根目录（Tauri OS 拖放事件驱动） -->
+      <div id="drop-overlay" hidden>
+        <div class="drop-box">松开以添加媒体根目录</div>
+      </div>
+
+      <!-- 媒体预览灯箱 -->
+      <div id="lightbox" hidden>
+        <button type="button" id="lightbox-close" aria-label="关闭预览">×</button>
+        <div id="lightbox-stage"></div>
+        <div id="lightbox-caption"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

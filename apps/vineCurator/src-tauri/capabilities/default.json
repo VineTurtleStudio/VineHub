@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicktomlin/tauri-v2/main/crates/tauri-config-schema/capabilities-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for vineCurator",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ]
+}

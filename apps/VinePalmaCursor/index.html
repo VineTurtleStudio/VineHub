@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VinePalmaCursor - 光标制作</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="toolbar">
+      <div class="brand">VinePalmaCursor</div>
+      <div class="tool-group" id="tool-group">
+        <button class="tool-btn active" data-tool="brush" title="画笔 (B)">✏️ 画笔</button>
+        <button class="tool-btn" data-tool="eraser" title="橡皮 (E)">🧽 橡皮</button>
+        <button class="tool-btn" data-tool="fill" title="填充 (G)">🪣 填充</button>
+        <button class="tool-btn" data-tool="line" title="直线 (L)">➖ 直线</button>
+        <button class="tool-btn" data-tool="rect" title="矩形 (R)">▭ 矩形</button>
+        <button class="tool-btn" data-tool="ellipse" title="椭圆 (O)">◯ 椭圆</button>
+        <button class="tool-btn" data-tool="eyedropper" title="取色 (I)">💉 取色</button>
+        <button class="tool-btn" data-tool="hotspot" title="热点 (H)">🎯 热点</button>
+        <button class="tool-btn" data-tool="move" title="移动图层 (M)">✋ 移动</button>
+      </div>
+      <div class="tool-group">
+        <label class="inline-label" for="color-picker">颜色</label>
+        <input type="color" id="color-picker" value="#000000" title="绘制颜色" />
+        <label class="inline-label" for="brush-size">大小</label>
+        <input type="range" id="brush-size" min="1" max="16" value="1" title="画笔大小" />
+        <span id="brush-size-label">1</span>
+        <label class="inline-label" for="opacity" title="绘制不透明度">透明度</label>
+        <input type="range" id="opacity" min="10" max="100" value="100" title="绘制不透明度" />
+        <span id="opacity-label">100%</span>
+      </div>
+      <div class="tool-group">
+        <button id="undo-btn" title="撤销 (Ctrl+Z)">↩ 撤销</button>
+        <button id="redo-btn" title="重做 (Ctrl+Y)">↪ 重做</button>
+        <button id="zoom-out-btn" title="缩小">−</button>
+        <button id="zoom-in-btn" title="放大">＋</button>
+        <span id="zoom-label">8x</span>
+      </div>
+      <div class="spacer"></div>
+      <div class="tool-group">
+        <button id="save-project-btn" title="保存为项目文件 (.vpc)">💾 保存</button>
+        <button id="open-project-btn" title="打开项目文件 (.vpc)">📂 打开</button>
+        <button id="import-btn" title="导入 .cur / .ani / 图片">导入</button>
+        <button id="export-btn" class="primary" title="导出为 Windows 光标 (.cur)">导出 .cur</button>
+        <button id="export-ani-btn" class="primary" title="导出为 Windows 动画光标 (.ani)">导出 .ani</button>
+      </div>
+    </header>
+
+    <main id="workspace">
+      <section id="canvas-wrap">
+        <div id="canvas-scroll">
+          <canvas id="editor-canvas"></canvas>
+        </div>
+        <div id="status-bar">
+          <span id="cursor-position">x: 0, y: 0</span>
+          <span id="document-info">尺寸: 32 x 32</span>
+        </div>
+      </section>
+
+      <aside id="side-panel">
+        <div class="panel-section">
+          <h3 class="panel-title">图层 <span class="chevron">▾</span></h3>
+          <div class="panel-body">
+            <div class="row">
+              <button id="layer-add-btn" title="新建图层" class="btn-sm">＋ 图层</button>
+              <button id="layer-dup-btn" title="复制当前图层" class="btn-sm">复制</button>
+              <button id="layer-del-btn" title="删除当前图层" class="btn-sm">删除</button>
+            </div>
+            <div class="row">
+              <button id="layer-up-btn" title="上移图层（更靠上）" class="btn-sm flex">↑ 上移</button>
+              <button id="layer-down-btn" title="下移图层" class="btn-sm flex">↓ 下移</button>
+            </div>
+            <div class="row">
+              <button id="layer-flip-h-btn" title="水平翻转图层" class="btn-sm flex">⇔ 水平翻转</button>
+              <button id="layer-flip-v-btn" title="垂直翻转图层" class="btn-sm flex">⇕ 垂直翻转</button>
+            </div>
+            <div id="layer-list" class="layer-list"></div>
+            <p class="hint">双击图层名可重命名</p>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3 class="panel-title">属性 <span class="chevron">▾</span></h3>
+          <div class="panel-body">
+            <div class="row">
+              <label for="canvas-size">画布尺寸</label>
+              <input type="number" id="canvas-size" min="16" max="128" step="8" value="32" />
+              <button id="apply-size-btn" class="btn-sm" title="调整画布尺寸">应用</button>
+            </div>
+            <button id="clear-canvas-btn" class="btn-sm block">清空当前图层</button>
+            <div class="row">
+              <label for="canvas-bg">画布背景</label>
+              <select id="canvas-bg">
+                <option value="checkerboard" selected>棋盘格</option>
+                <option value="white">白色</option>
+                <option value="black">黑色</option>
+              </select>
+            </div>
+            <label class="check-row" title="在画布上显示像素网格">
+              <input type="checkbox" id="grid-toggle" checked />
+              <span>显示网格</span>
+            </label>
+            <div class="row">
+              <label for="fill-tolerance" title="0 = 精确匹配，越大容差越大">填充容差</label>
+              <input type="range" id="fill-tolerance" min="0" max="128" value="0" title="0 = 精确匹配，越大容差越大" />
+              <span id="fill-tolerance-label">0</span>
+            </div>
+            <div class="row">
+              <label>热点 X</label>
+              <input type="number" id="hotspot-x" min="0" max="127" value="16" />
+            </div>
+            <div class="row">
+              <label>热点 Y</label>
+              <input type="number" id="hotspot-y" min="0" max="127" value="16" />
+            </div>
+            <button id="sync-hotspot-btn" class="btn-sm block" title="将当前帧热点应用到所有帧">同步热点到全部帧</button>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3 class="panel-title">预览 <span class="chevron">▾</span></h3>
+          <div class="panel-body">
+            <button id="panel-import-btn" class="btn-sm block primary" title="导入 .cur / .ani / PNG / GIF / JPG / BMP">📂 导入图片 / GIF / 光标</button>
+            <div class="preview-box">
+              <div id="preview-background" style="padding: 12px;">
+                <canvas id="preview-canvas" width="32" height="32"></canvas>
+              </div>
+            </div>
+            <div class="row">
+              <label for="preview-size">缩放</label>
+              <select id="preview-size">
+                <option value="1">100%</option>
+                <option value="2" selected>200%</option>
+                <option value="4">400%</option>
+              </select>
+            </div>
+            <div class="row">
+              <label for="preview-bg">背景</label>
+              <select id="preview-bg">
+                <option value="light" selected>浅色</option>
+                <option value="dark">深色</option>
+                <option value="checkerboard">棋盘格</option>
+              </select>
+            </div>
+            <div class="row">
+              <button id="panel-export-cur-btn" class="btn-sm flex" title="导出 Windows 光标">导出 .cur</button>
+              <button id="panel-export-ani-btn" class="btn-sm flex" title="导出动画光标 (全部帧)">导出 .ani</button>
+            </div>
+            <button id="export-png-btn" class="btn-sm block" title="将当前帧导出为透明背景 PNG">导出当前帧 PNG</button>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <h3 class="panel-title">历史 <span class="hint-inline">点击跳转</span><span class="chevron">▾</span></h3>
+          <div class="panel-body">
+            <div id="history-list" class="history-list"></div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <section id="timeline-bar">
+      <div class="tl-controls">
+        <button id="frame-add-btn" title="追加一帧">＋ 帧</button>
+        <button id="frame-dup-btn" title="复制当前帧">复制</button>
+        <button id="frame-del-btn" title="删除当前帧">删除</button>
+        <button id="frame-left-btn" title="当前帧前移">◀</button>
+        <button id="frame-right-btn" title="当前帧后移">▶</button>
+        <button id="frame-to-all-btn" title="用当前帧替换所有帧（同图层与热点）" class="btn-sm">填充全部帧</button>
+      </div>
+      <div id="timeline-scroll" class="tl-scroll">
+        <div id="timeline-list"></div>
+      </div>
+      <div class="tl-controls tl-settings">
+        <label class="inline-label" for="frame-delay">延迟</label>
+        <input type="number" id="frame-delay" min="0" max="10000" step="10" value="100" />
+        <span class="inline-label">ms</span>
+        <label class="check-row" title="在编辑画布上以半透明显示相邻帧">
+          <input type="checkbox" id="onion-toggle" />
+          洋葱皮
+        </label>
+        <button id="preview-play-btn" title="播放动画">▶ 播放</button>
+        <label class="inline-label" for="preview-speed">速度</label>
+        <select id="preview-speed">
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+        </select>
+      </div>
+    </section>
+
+    <div id="modal-overlay" class="hidden">
+      <div id="modal"></div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicktomlin/tauri-v2/main/crates/tauri-config-schema/schema.json",
+  "productName": "vinePress",
+  "version": "0.1.0",
+  "identifier": "com.vineturtle.vinepress",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5174",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "vinePress - 文件归档与批量压缩",
+        "width": 1500,
+        "height": 950,
+        "minWidth": 1100,
+        "minHeight": 700,
+        "resizable": true,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

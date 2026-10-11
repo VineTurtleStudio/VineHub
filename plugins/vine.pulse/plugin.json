@@ -5,16 +5,14 @@
   "version": "0.1.0",
   "apiVersion": "1.0",
   "kind": "sidecar",
-  "entry": "D:\\VineTurtleStudio\\Projects\\vinePulse\\target\\release\\vine-pulse.exe",
+  "entry": "../../target/debug/vine-pulse.exe",
   "panels": [
     { "id": "scan", "title": "损坏检测", "ui": "dist/index.html", "icon": "pulse" }
-  ],  "commands": [],
+  ],
+  "commands": [],
   "permissions": {
     "fs.read": ["user-picked"],
-    "fs.write": [],
-    "net": false,
-    "exec": false
-  },
-  "dataDir": "vine.pulse",
-  "minHubVersion": "0.1.0"
+    "fs.write": ["temp"],
+    "network": []
+  }
 }

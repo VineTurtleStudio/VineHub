@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicktomlin/tauri-v2/main/crates/tauri-config-schema/schema.json",
+  "productName": "VinePalmaCursor",
+  "version": "0.1.0",
+  "identifier": "com.vinepalma.cursor",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "VinePalmaCursor - 鼠标光标制作",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

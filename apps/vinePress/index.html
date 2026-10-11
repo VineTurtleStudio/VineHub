@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>vinePress - 文件归档</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <nav id="menubar">
+      <div class="menu">
+        <button type="button" class="menu-title">文件</button>
+        <div class="menu-pop">
+          <button type="button" class="menu-item" data-cmd="newProject" data-keys="Ctrl+N"><span class="mi-label">新建项目</span><kbd>Ctrl+N</kbd></button>
+          <button type="button" class="menu-item" data-cmd="openProject" data-keys="Ctrl+O"><span class="mi-label">打开项目…</span><kbd>Ctrl+O</kbd></button>
+          <div class="menu-sep" id="recent-sep" hidden></div>
+          <div id="recent-menu" hidden>
+            <div class="menu-recent-title">最近打开</div>
+          </div>
+          <button type="button" class="menu-item" data-cmd="saveProject" data-keys="Ctrl+S"><span class="mi-label">保存</span><kbd>Ctrl+S</kbd></button>
+          <button type="button" class="menu-item" data-cmd="saveProjectAs" data-keys="Ctrl+Shift+S"><span class="mi-label">另存为…</span><kbd>Ctrl+Shift+S</kbd></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-cmd="settings" data-keys="Ctrl+,"><span class="mi-label">设置…</span><kbd>Ctrl+,</kbd></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-cmd="quit"><span class="mi-label">退出</span></button>
+        </div>
+      </div>
+
+      <div class="menu">
+        <button type="button" class="menu-title">编辑</button>
+        <div class="menu-pop">
+          <button type="button" class="menu-item" data-cmd="selectAll" data-keys="Ctrl+A"><span class="mi-label">全选条目</span><kbd>Ctrl+A</kbd></button>
+          <button type="button" class="menu-item" data-cmd="selectNone" data-keys="Ctrl+Shift+A"><span class="mi-label">取消全选</span><kbd>Ctrl+Shift+A</kbd></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-cmd="batchEdit" data-busy="block"><span class="mi-label">批量编辑…</span></button>
+          <button type="button" class="menu-item" data-cmd="autofill" data-busy="block"><span class="mi-label">自动识别填充…</span></button>
+          <button type="button" class="menu-item" data-cmd="classify" data-busy="block"><span class="mi-label">新建分类并复制…</span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-cmd="previewNote"><span class="mi-label">预览说明文件</span></button>
+          <button type="button" class="menu-item" data-cmd="diffNote"><span class="mi-label">对比说明文件（字段级）</span></button>
+          <button type="button" class="menu-item" data-cmd="trash" data-keys="Delete" data-busy="block"><span class="mi-label">删除所选文件（回收站）</span><kbd>Delete</kbd></button>
+          <button type="button" class="menu-item" data-cmd="globalSearch" data-keys="Ctrl+Shift+F"><span class="mi-label">全局搜索…</span><kbd>Ctrl+Shift+F</kbd></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-cmd="palette" data-keys="Ctrl+K"><span class="mi-label">命令面板…</span><kbd>Ctrl+K</kbd></button>
+        </div>
+      </div>
+
+      <div class="menu">
+        <button type="button" class="menu-title">视图</button>
+        <div class="menu-pop">
+          <button type="button" class="menu-item" data-pane="left" data-check="left" data-keys="Ctrl+1"><span class="mi-label">目录树面板</span><kbd>Ctrl+1</kbd></button>
+          <button type="button" class="menu-item" data-pane="right" data-check="right" data-keys="Ctrl+2"><span class="mi-label">详情面板</span><kbd>Ctrl+2</kbd></button>
+          <button type="button" class="menu-item" data-pane="file" data-check="file" data-keys="Ctrl+3"><span class="mi-label">文件面板</span><kbd>Ctrl+3</kbd></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-layout-reset="1"><span class="mi-label">重置布局</span></button>
+        </div>
+      </div>
+
+      <div class="menu">
+        <button type="button" class="menu-title">工具</button>
+        <div class="menu-pop">
+          <button type="button" class="menu-item" data-cmd="scan" data-keys="F5" data-busy="block"><span class="mi-label">扫描识别</span><kbd>F5</kbd></button>
+          <button type="button" class="menu-item" data-cmd="notes" data-keys="Ctrl+G" data-busy="block"><span class="mi-label">生成说明文件</span><kbd>Ctrl+G</kbd></button>
+          <button type="button" class="menu-item" data-cmd="auditNotes" data-busy="block"><span class="mi-label">核对说明文件…</span></button>
+          <button type="button" class="menu-item" data-cmd="findDupes" data-busy="block"><span class="mi-label">查找重复文件…</span></button>
+          <button type="button" class="menu-item" data-cmd="verifyManifest" data-busy="block"><span class="mi-label">校验导出完整性…</span></button>
+          <button type="button" class="menu-item" data-cmd="nameAudit" data-busy="block"><span class="mi-label">命名检查与修复…</span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-cmd="exportSettings" data-busy="block"><span class="mi-label">导出设置…</span></button>
+          <button type="button" class="menu-item" data-cmd="exportRun" data-keys="Ctrl+E" data-busy="block"><span class="mi-label">开始导出</span><kbd>Ctrl+E</kbd></button>
+          <button type="button" class="menu-item" data-cmd="exportCancel" data-busy="only"><span class="mi-label">取消导出</span></button>
+        </div>
+      </div>
+
+      <div class="menu">
+        <button type="button" class="menu-title">帮助</button>
+        <div class="menu-pop">
+          <button type="button" class="menu-item" data-cmd="shortcuts"><span class="mi-label">快捷键列表</span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-cmd="about"><span class="mi-label">关于 vinePress</span></button>
+        </div>
+      </div>
+    </nav>
+
+    <header id="toolbar">
+      <div class="brand">vinePress</div>
+
+      <div class="tool-group">
+        <button id="project-new-btn" data-busy-guard class="btn">新建项目</button>
+        <button id="project-open-btn" data-busy-guard class="btn">打开项目</button>
+        <button id="project-save-btn" data-busy-guard class="btn">保存</button>
+      </div>
+
+      <div class="tool-group">
+        <label class="inline-label" for="root-path">根目录</label>
+        <input type="text" id="root-path" class="path-input" title="根目录（扫描识别的起点）" placeholder="D:\18138" />
+        <button id="pick-root-btn" class="btn-sm">选择</button>
+        <button id="scan-btn" class="btn primary">扫描识别</button>
+      </div>
+
+      <div class="tool-group">
+        <label class="inline-label" for="output-path">输出目录</label>
+        <input type="text" id="output-path" class="path-input" title="输出目录（导出压缩包写入位置）" placeholder="D:\18138-分享压缩包" />
+        <button id="pick-output-btn" class="btn-sm">选择</button>
+      </div>
+
+      <div class="spacer"></div>
+
+      <div class="tool-group">
+        <button id="notes-btn" data-busy-guard class="btn" title="为选中单位生成 &lt;单位名&gt;.txt 说明文件">生成说明文件</button>
+        <button id="export-settings-btn" data-busy-guard class="btn">导出设置</button>
+        <button id="export-btn" class="btn primary">开始导出</button>
+        <button id="export-cancel-btn" class="btn danger" disabled>取消</button>
+        <button id="settings-btn" class="btn" title="设置（Ctrl+,）">设置</button>
+      </div>
+    </header>
+
+    <main id="workspace">
+      <aside id="left-panel">
+        <section class="panel-section">
+          <h3 class="panel-title">目录结构 <span class="hint-inline" id="tree-stats"></span><span class="chevron">▾</span></h3>
+          <div class="panel-body">
+            <div class="row">
+              <input type="search" id="tree-filter" placeholder="过滤路径…" />
+            </div>
+            <div class="row tree-ops">
+              <span class="hint" id="tree-ops-name">未选择节点</span>
+              <span class="flex"></span>
+              <button id="tree-expand-all-btn" class="btn-sm" title="展开目录树全部有子项的节点">全部展开</button>
+              <button id="tree-collapse-all-btn" class="btn-sm" title="收起目录树全部节点">收起</button>
+            </div>
+            <div class="row tree-ops">
+              <button id="force-unit-btn" data-busy-guard class="btn-sm" disabled title="把该目录整体当作一个压缩单位（停止下钻）">强制为单位</button>
+              <button id="force-container-btn" data-busy-guard class="btn-sm" disabled title="下钻：把该单位拆成它的子目录">强制为容器</button>
+              <button id="merge-up-btn" data-busy-guard class="btn-sm" disabled title="把该目录并入它的上级目录，吸收同级兄弟单位">并入上级</button>
+              <button id="restore-auto-btn" data-busy-guard class="btn-sm" disabled title="移除手动覆盖，恢复自动识别">恢复自动识别</button>
+            </div>
+            <div id="tree-view" class="tree-view"></div>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <h3 class="panel-title">统计<span class="chevron">▾</span></h3>
+          <div class="panel-body">
+            <div id="stats-box" class="stats-box">尚未扫描</div>
+          </div>
+        </section>
+      </aside>
+
+      <div id="split-left" class="splitter" title="拖动调整宽度 · 双击复位"></div>
+
+      <section id="center-panel">
+        <div id="table-toolbar">
+          <input type="search" id="entry-filter" placeholder="搜索标题 / 路径 / 艺人…" />
+          <select id="kind-filter">
+            <option value="">全部类型</option>
+            <option value="album">专辑</option>
+            <option value="novel">小说</option>
+            <option value="artbook">图册</option>
+            <option value="comic">漫画</option>
+            <option value="score">乐谱</option>
+            <option value="concert">演唱会</option>
+            <option value="video">视频</option>
+            <option value="document">资料</option>
+            <option value="other">其它</option>
+          </select>
+          <select id="status-filter">
+            <option value="">全部状态</option>
+            <option value="pending">待导出</option>
+            <option value="done">已导出</option>
+            <option value="skipped">已存在</option>
+            <option value="error">失败</option>
+          </select>
+          <button id="filter-toggle" class="btn-sm" title="高级筛选：年份 / 标签 / 密码方案 / 大小区间">筛选</button>
+          <span class="flex"></span>
+          <span id="sel-counter" class="hint"></span>
+          <button id="select-all-btn" class="btn-sm">全选</button>
+          <button id="select-none-btn" class="btn-sm">全不选</button>
+          <button id="batch-edit-btn" data-busy-guard class="btn-sm">批量编辑</button>
+          <button id="autofill-btn" data-busy-guard class="btn-sm accent" title="扫描文件夹内容，按所选字段生成填充提案">自动识别填充</button>
+          <button id="classify-btn" data-busy-guard class="btn-sm" title="新建分类文件夹并把选中条目复制进去">新建分类并复制</button>
+        </div>
+        <div id="advanced-filter" class="hidden">
+          <select id="year-filter" title="按发行年份筛选（取日期前 4 位）">
+            <option value="">全部年份</option>
+          </select>
+          <select id="tag-filter" title="按标签筛选">
+            <option value="">全部标签</option>
+          </select>
+          <select id="profile-filter" title="按密码方案筛选">
+            <option value="">全部密码方案</option>
+          </select>
+          <label class="fb-range">大小 ≥<input type="number" id="size-min" min="0" step="0.5" placeholder="GiB" /></label>
+          <label class="fb-range">≤<input type="number" id="size-max" min="0" step="0.5" placeholder="GiB" /></label>
+          <span class="flex"></span>
+          <span id="filter-count" class="hint"></span>
+          <button id="filter-clear" class="btn-sm">清除筛选</button>
+        </div>
+        <div id="entry-table-wrap">
+          <table id="entry-table">
+            <thead>
+              <tr>
+                <th class="col-check"><input type="checkbox" id="entry-check-all" checked /></th>
+                <th class="col-kind" data-sort="kind">类型<span class="col-resizer"></span></th>
+                <th class="col-title" data-sort="title">标题<span class="col-resizer"></span></th>
+                <th class="col-path" data-sort="rel_path">相对路径<span class="col-resizer"></span></th>
+                <th class="col-size" data-sort="size">大小<span class="col-resizer"></span></th>
+                <th class="col-files" data-sort="files">文件数<span class="col-resizer"></span></th>
+                <th class="col-status" data-sort="status">状态<span class="col-resizer"></span></th>
+                <th class="col-fill"></th>
+              </tr>
+            </thead>
+            <tbody id="entry-tbody"></tbody>
+          </table>
+        </div>
+
+        <div id="split-file" class="splitter" title="拖动调整文件面板高度 · 双击复位"></div>
+
+        <section id="file-panel">
+          <div id="file-toolbar">
+            <span id="file-cwd" class="hint">未选择目录</span>
+            <span class="flex"></span>
+            <label class="check-row compact"><input type="checkbox" id="file-show-all" /><span>全部文件</span></label>
+            <button id="file-up-btn" data-busy-guard class="btn-sm">上级</button>
+            <button id="file-refresh-btn" data-busy-guard class="btn-sm">刷新</button>
+            <button id="file-open-btn" data-busy-guard class="btn-sm">打开</button>
+            <button id="file-reveal-btn" data-busy-guard class="btn-sm">定位</button>
+            <button id="file-mkdir-btn" data-busy-guard class="btn-sm">新建文件夹</button>
+            <button id="file-rename-btn" data-busy-guard class="btn-sm" title="重命名选中的目录或文件">重命名…</button>
+            <button id="file-trash-btn" data-busy-guard class="btn-sm danger" title="把选中项移入回收站（可找回）；快捷键 Delete">删除</button>
+            <button id="file-copy-btn" data-busy-guard class="btn-sm">复制到…</button>
+            <button id="file-move-btn" data-busy-guard class="btn-sm">移动到…</button>
+          </div>
+          <div id="file-list" class="file-list"></div>
+        </section>
+      </section>
+
+      <div id="split-right" class="splitter" title="拖动调整宽度 · 双击复位"></div>
+
+      <aside id="right-panel">
+        <section class="panel-section">
+          <h3 class="panel-title">条目详情 <span class="hint-inline" id="detail-hint">未选中</span><span class="chevron">▾</span></h3>
+          <div class="panel-body" id="detail-form">
+            <p class="hint">在左侧表格中选择一个条目进行编辑。</p>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <h3 class="panel-title">密码方案 <span class="chevron">▾</span></h3>
+          <div class="panel-body">
+            <div id="password-list" class="password-list"></div>
+            <div class="row">
+              <input type="text" id="new-usage-input" placeholder="方案名（如 小说图册等）" />
+            </div>
+            <div class="row">
+              <input type="text" id="new-password-input" placeholder="新密码（追加到选中方案）" />
+              <button id="add-password-btn" class="btn-sm">添加</button>
+            </div>
+            <p class="hint">密码会以 <code>[密码]</code> 标签写入压缩包文件名，并启用 RAR 头加密。多密码方案按路径稳定取样。</p>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <h3 class="panel-title">压缩参数 <span class="chevron">▾</span></h3>
+          <div class="panel-body">
+            <div class="row">
+              <label for="archive-format">格式</label>
+              <select id="archive-format">
+                <option value="rar" selected>RAR5（WinRAR）</option>
+                <option value="zip">ZIP（内置）</option>
+              </select>
+            </div>
+            <div class="row">
+              <label for="volume-size">分卷大小 (MiB)</label>
+              <input type="number" id="volume-size" value="900" min="0" step="1" />
+            </div>
+            <label class="check-row">
+              <input type="checkbox" id="comment-toggle" checked />
+              <span>写入压缩注释（= 说明文件内容）</span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" id="encrypt-names-toggle" checked />
+              <span>加密文件名（-hp）</span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" id="overwrite-toggle" />
+              <span>覆盖已存在的压缩包</span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" id="incremental-toggle" />
+              <span>增量跳过未变动单位（按导出清单）</span>
+            </label>
+            <p class="hint" id="format-hint"></p>
+          </div>
+        </section>
+        <section class="panel-section">
+          <h3 class="panel-title">日志 <span class="hint-inline" id="log-count"></span><span class="chevron">▾</span></h3>
+          <div class="panel-body">
+            <div id="log-view" class="log-view"><span class="hint">暂无日志</span></div>
+            <div class="row">
+              <button id="log-clear-btn" class="btn-sm">清空</button>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </main>
+
+    <footer id="status-bar">
+      <div id="progress-track"><div id="progress-fill"></div></div>
+      <span id="progress-text">就绪</span>
+      <span class="flex"></span>
+      <span id="unit-progress"></span>
+      <span id="tool-status"></span>
+    </footer>
+
+    <div id="modal-overlay" class="hidden">
+      <div id="modal"></div>
+    </div>
+
+    <div id="palette-overlay" class="hidden">
+      <div id="palette">
+        <input id="palette-input" type="text" placeholder="输入命令…（↑↓ 选择 · Enter 执行 · Esc 关闭）" spellcheck="false" autocomplete="off" />
+        <div id="palette-list"></div>
+      </div>
+    </div>
+
+    <div id="search-overlay" class="hidden">
+      <div id="search-panel">
+        <input id="search-input" type="text" placeholder="搜索条目：标题 / 路径 / 艺人 / 标签 / 备注…（↑↓ 选择 · Enter 跳转 · Esc 关闭）" spellcheck="false" autocomplete="off" />
+        <div id="search-list"></div>
+      </div>
+    </div>
+
+    <div id="toast" class="hidden"></div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

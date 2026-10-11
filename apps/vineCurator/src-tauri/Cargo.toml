@@ -1,0 +1,36 @@
+[package]
+name = "vine-curator"
+version = "0.1.0"
+edition = "2021"
+description = "vineCurator - 本地媒体资产管理器"
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.35"
+sha2 = "0.10"
+image = "0.25"
+argon2 = "0.5"
+# 开 password-hash/getrandom → 提供 rand_core::OsRng（SaltString::generate 需要），与 argon2 共用同一实例
+password-hash = { version = "0.5", features = ["getrandom"] }
+
+[lib]
+name = "vine_curator_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+# bin 无测试，且测试 harness exe 会被本机杀软误杀（os error 5/14001）
+[[bin]]
+name = "vine-curator"
+path = "src/main.rs"
+test = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# 杀软偶发误杀测试/构建产物：strip 减小特征面（bin 已 test=false）
+[profile.dev]
+strip = "debuginfo"

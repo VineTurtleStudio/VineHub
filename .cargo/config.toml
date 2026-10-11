@@ -7,3 +7,8 @@ rustflags = [
     "-Lnative=C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64",
     "-Lnative=C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\ucrt\\x64",
 ]
+
+# 测试并发数：默认 16 线程（≥ CPU 核数）同时创建/删除临时文件会触发
+# Defender 实时扫描风暴，全套测试从 ~1s 恶化到 ~60s；钉到 4 线程后稳定 ~1s
+[env]
+RUST_TEST_THREADS = "4"

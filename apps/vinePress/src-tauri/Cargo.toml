@@ -1,0 +1,25 @@
+[package]
+name = "vine-press"
+version = "0.1.0"
+edition = "2021"
+description = "vinePress - 文件归档与批量压缩工具"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+encoding_rs = "0.8"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp", "tiff"] }
+opener = "0.9.0"
+zip = { version = "8.6.0", features = ["deflate"] }
+trash = "5.2.9"
+sha2 = "0.10"
+base64 = "0.22"
+
+[lib]
+name = "vine_press_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

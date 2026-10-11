@@ -4,6 +4,12 @@ members = [
     "crates/vine-plugin-api",
     "crates/vine-host-core",
     "apps/vine-hub/src-tauri",
+    # P2.1 迁入的第一方插件（独立运行能力 100% 保留）
+    "apps/vinePulse",
+    "apps/vinePress/src-tauri",
+    "apps/vineSync/src-tauri",
+    "apps/vineCurator/src-tauri",
+    "apps/VinePalmaCursor/src-tauri",
 ]
 
 [workspace.package]

@@ -1,0 +1,369 @@
+# vineSync
+
+> 现代化的 Windows 文件夹同步备份工具 —— 将 D 盘指定文件夹自动同步（镜像）到 F 盘
+
+VineTurtleStudio 项目 · 平台：Windows 10 / 11 · 技术栈：**Tauri 2 + React + TypeScript + Rust**
+
+## 项目背景
+
+需要在笔记本上实现「D 盘部分文件夹备份到 F 盘，且 D 盘修改后 F 盘自动跟随同步」。现有工具（如 FreeFileSync）功能满足但界面老旧、交互不够现代化，因此自研一款界面现代、简单易用的桌面同步工具。
+
+## 技术选型（已定稿）
+
+| 层 | 选型 | 说明 |
+| --- | --- | --- |
+| 应用框架 | **Tauri 2** | 安装包小、内存占用低，Rust 后端 + WebView2 前端 |
+| 前端 | **React 19 + TypeScript + Vite** | 现代化 UI，组件化 + 强类型，内置中英双语（i18n） |
+| 后端 | **Rust** | 同步引擎、文件监控、调度、托盘、通知 |
+| 数据库 | **SQLite（rusqlite, bundled）** | 同步历史、上次同步状态、文件元数据快照 |
+| 配置 | **JSON（`config.json`）** | 文件夹对、删除策略、触发方式、主题、语言等，人可读可手改 |
+| 关键 crate | `notify`（文件监控）、`sha2`（哈希校验）、`globset`（过滤器）、`walkdir`（扫描）、`chrono`（时间戳）、`tauri-plugin-single-instance`（单实例）、`tauri-plugin-autostart`（开机自启） | — |
+
+运行时依赖：WebView2（Win10/11 自带或随安装器分发）、MSVC 运行库。
+
+## 核心功能需求
+
+### 1. 自定义文件夹对
+
+- 支持多组 `D:\xxx → F:\备份\xxx` 文件夹对，每对可独立启用/停用
+- 支持**排除/包含过滤器**（glob 通配，按行书写），只备份文件夹中的部分内容：
+  - 包含（include）：为空表示全部；否则仅匹配的条目进入同步范围（如 `*.docx`、`项目A/**`）
+  - 排除（exclude）：匹配的条目永远跳过（如 `*.tmp`、`node_modules/**`）；顶层「版本备份」与 `$RECYCLE.BIN`、`System Volume Information` 系统目录自动保留跳过
+  - 扫描容错：无权访问的子树（如回收站 `os error 5`）自动跳过并继续，且不会导致目标端对应副本被误判删除；仅根目录本身不可读才报错
+
+### 2. 单向镜像同步（D → F）
+
+- D 盘新增、修改的文件同步到 F 盘；删除行为由删除策略决定
+- 变更对比：**大小 + 修改时间**不一致即视为变更（源为准，单向覆盖）；开启「哈希校验」时对时间/大小一致的文件追加 SHA-256 比对，防止同大小同时间的隐性损坏
+- **安全复制**：写入同目录临时文件 `*.vinesync.tmp` → 校验大小 → 原子重命名覆盖目标 → 回写源文件的修改时间；断电/中断不会损坏目标文件，也不会产生半截文件
+- 同步前对目标盘做**可用性检查**（盘符是否存在）：F 盘不可用时跳过本次同步并记录，恢复后由下一次触发自动补同步（全量扫描对比，天然幂等）
+
+### 3. 删除策略（三选一，默认 A）
+
+| 策略 | 行为 |
+| --- | --- |
+| **A. 镜像 + 版本备份（默认，推荐）** | 被删除/被覆盖的 F 盘文件带时间戳移入版本目录，既防误删又不弄乱主备份 |
+| B. 纯镜像 | F 盘与 D 盘完全一致，删除同步传播（不做版本备份） |
+| C. 只增改不删 | 最保守：新增/更新正常同步，**删除不传播**；覆盖前自动版本备份旧文件，F 盘保留全部历史 |
+
+> 版本策略细化（设置 → 版本备份）：「覆盖前备份」「源删除时备份」两个开关分别控制上表 A/C 的留档行为（策略 B 始终纯镜像）；
+> 「每文件最多保留份数」（0 = 不限）与「保留天数」独立生效，超出份数自动删除该文件最旧的历史版本。
+
+版本备份目录结构（位于目标文件夹对根目录下，与备份内容同层级）：
+
+```
+<目标根>/版本备份/<相对子路径>/<文件名>_yyyy-MM-dd_HH-mm-ss.<扩展名>
+例：F:\备份\文档\版本备份\报告\年终总结_2026-10-08_21-30-00.docx
+```
+
+版本备份支持在设置页按天数一键清理（默认保留 30 天）。
+
+### 4. 同步触发方式（三选一，默认定时）
+
+| 模式 | 行为 |
+| --- | --- |
+| 手动 | 一键「立即同步」（全部文件夹对，或单对） |
+| **定时（默认每 10 分钟）** | 应用常驻后台（托盘）+ 进程内调度线程，间隔 1～1440 分钟可调；每个文件夹对可在编辑器里设置独立间隔覆盖（1～10080 分钟，留空用全局） |
+| 实时监控 | `notify`（底层 `ReadDirectoryChangesW`）监听所有启用的源文件夹，变动防抖（默认 3 秒）后自动触发同步 |
+| — | F 盘不可用自动跳过，恢复后下次触发补同步；同步互斥，触发重叠时排队为「待同步」 |
+
+### 5. 同步预览
+
+- 手动同步执行前展示变更清单：**新增 / 更新 / 删除 / 版本备份**，含数量与文件大小，确认后再执行
+- 可在设置中关闭确认（一键直同步）；定时与实时触发默认直接执行（否则会被通知刷屏）
+
+### 6. 日志与通知
+
+- 系统托盘气泡 + 系统通知：同步完成（含变更数量）/ 同步出错
+- SQLite 同步历史：每次同步的时间、文件夹对、成功/失败、新增/更新/删除/版本备份数量、错误信息；可查看、可清空
+- 全程系统托盘常驻，关闭窗口不退出，托盘菜单：显示主界面 / 立即同步 / 退出
+
+### 7. 进阶能力（第二轮）
+
+| 能力 | 说明 |
+| --- | --- |
+| 开机自启动 | 设置 → 行为开关；启动/保存配置时与 HKCU Run 同步（`tauri-plugin-autostart`），失败仅记录日志不影响保存 |
+| 单实例 | `tauri-plugin-single-instance`：重复启动不新开进程，激活已有主窗口（E2E 已验证） |
+| 数据目录可视化 | 设置 → 数据目录：展示实际数据目录、程序路径、版本号与便携标识 |
+| 网络路径（UNC/NAS） | 可用性探测支持 `\\server\share`（取 share 根探测）；探测在线程中执行并带 8 秒超时，网络挂死不会卡住同步队列 |
+| 多语言（中英） | 界面、同步结果消息、系统通知、托盘、校验提示全量中英双语；设置页切换即时预览、保存后固化（`language: "zh"/"en"`）；磁盘上的目录名（如 `版本备份`）为数据不翻译 |
+| 扫描进度 | 预览与同步的目录扫描阶段广播 `scan-progress`（每 250ms 节流：文件夹对、阶段、已扫描数、当前路径），大目录不再"假死" |
+| 便携版（免安装） | exe 旁存在 `vinesync.portable` 标记即便携模式：数据（配置/SQLite/WebView2 缓存）随目录存于 `portable_data\`，只读介质自动回退用户目录；`npm run package:portable` 一键出 zip |
+
+## 界面设计要求（现代化）
+
+- 深色 / 浅色主题（跟随系统可切换），CSS 变量驱动，圆角卡片式布局，流畅过渡动画
+- **主页**：文件夹对卡片列表（源 → 目标、上次同步时间、变更数量、启用开关）+「立即同步」主按钮 + 全局状态（空闲/同步中/上次结果）
+- **同步预览弹窗**：变更清单按类型分组（新增/更新/删除/版本备份），可滚动、带体积统计
+- **设置页**：删除策略三卡片单选、触发方式单选 + 数值输入、哈希校验/通知/确认/开机自启开关、复制线程数、版本策略开关与份数上限、语言切换、主题切换、数据目录与版本信息、版本备份清理
+- **历史页**：同步日志表格，失败原因高亮
+- 文件夹选择使用系统目录选择对话框（tauri-plugin-dialog）
+- 全程系统托盘常驻，最小化不占用任务栏
+- 中英双语切换（设置 → 语言，即时预览）
+
+## 架构设计
+
+```
+┌────────────────────────── WebView (React + TS) ──────────────────────────┐
+│  主页(卡片/同步) · 预览弹窗 · 设置页 · 历史页 · 主题系统                  │
+└───────────────▲───────────────────────────────▲──────────────────────────┘
+        invoke(commands)                  listen(events: sync-started / sync-progress / scan-progress / sync-finished)
+┌───────────────┴───────────────────────────────┴──────────────────────────┐
+│                          Tauri 核心层 (src-tauri/src)                     │
+│  commands.rs   │ 事件广播  │ 托盘与通知  │ 窗口管理                        │
+├────────────────┴───────────┴─────────────┴───────────────────────────────┤
+│  runtime/  同步协调器（互斥执行、排队、状态广播）                          │
+│  trigger/  定时调度线程 + notify 实时监控（防抖）                          │
+├──────────────────────────────────────────────────────────────────────────┤
+│  core/     扫描(walkdir) → 过滤(globset) → 对比(大小+mtime/SHA256)        │
+│            → 计划(change list) → 执行(临时文件+原子改名+版本备份)         │
+│  storage/  配置 JSON 持久化  ·  SQLite(历史/状态/文件快照)                │
+└──────────────────────────────────────────────────────────────────────────┘
+                          ▼                          ▼
+                    D 盘（源，只读）            F 盘（目标，写入+版本备份）
+```
+
+模块职责：
+
+- `core/filter`：include/exclude glob 编译与匹配（目录级剪枝，排除的目录不再深入）
+- `core/scan`：源/目标扫描，产出 `rel_path → FileMeta{size, mtime}`
+- `core/diff`：对比生成变更计划 `Vec<Change{kind, rel_path, size}>`
+- `core/copy`：安全复制（临时文件 → 校验 → 原子重命名 → 回写 mtime）
+- `core/version`：版本备份移动与按天数清理
+- `storage/config`：`config.json` 读写（原子写、缺省项回填）
+- `storage/db`：SQLite 建表/迁移、历史写入、状态查询
+- `runtime/syncer`：单例同步互斥、执行、进度事件、结果统计
+- `trigger/*`：定时线程、`notify` 监听 + 防抖、目标盘可用性检查
+- `app/*`：Tauri setup、命令、事件、托盘、通知
+
+## 数据模型
+
+### 配置 `config.json`（安装版：`%APPDATA%\studio.vineturtle.vinesync\config.json`；便携版：`<exe>\portable_data\config.json`）
+
+```jsonc
+{
+  "pairs": [
+    {
+      "id": "uuid",
+      "name": "文档备份",
+      "source": "D:\\文档",
+      "dest": "F:\\备份\\文档",
+      "enabled": true,
+      "include": [],          // 为空 = 全部；如 ["*.docx", "项目A/**"]
+      "exclude": ["*.tmp", "node_modules/**"],
+      "intervalMinutes": null  // 定时同步间隔覆盖（分钟，null = 用全局 trigger.intervalMinutes）
+    }
+  ],
+  "deletePolicy": "versioned",  // "versioned"(A) | "mirror"(B) | "addOnly"(C)
+  "trigger": { "mode": "interval", "intervalMinutes": 10, "debounceMs": 3000 },
+  "hashVerify": false,
+  "notifyOnFinish": true,
+  "confirmBeforeSync": true,    // 手动同步是否先预览
+  "versionKeepDays": 30,
+  "versionOnReplace": true,     // 覆盖前把旧文件移入版本备份（策略 B 始终不备份）
+  "versionOnDelete": true,      // 源删除时目标副本移入版本备份（false = 策略 A 直接删除）
+  "versionMaxCount": 0,         // 每文件最多保留份数（0 = 不限）
+  "versionTimestampFormat": "%Y-%m-%d_%H-%M-%S", // 版本文件名时间戳格式（chrono 串，1~64 字符）
+  "copyThreads": 4,             // 1~16 并行复制线程数（1 = 顺序执行；旧配置缺省回填 4）
+  "verifyAfterCopy": false,     // 复制后回读目标比对源哈希（深度校验，失败自动重试）
+  "diffScan": false,            // 快速扫描：目标清单用上次成功同步的 file_state 快照推导，跳过目标遍历
+  "afterSyncAction": "none",    // "none" | "script" | "shutdown"（全部成功后才执行）
+  "afterSyncScript": "",        // 动作为 script 时的脚本路径（.ps1/.bat/.cmd/可执行）
+  "theme": "system",            // "system" | "dark" | "light"
+  "language": "zh",             // "zh" | "en"
+  "autostart": false            // 开机自启动（HKCU Run）
+}
+```
+
+### SQLite `state.db`（同目录）
+
+| 表 | 字段 | 用途 |
+| --- | --- | --- |
+| `sync_log` | id, pair_id, pair_name, started_at, finished_at, status, added, updated, deleted, versioned, skipped, failed, trigger_kind, message | 同步历史（历史页展示） |
+| `pair_state` | pair_id(PK), last_sync_at, last_status, added, updated, deleted, versioned, message | 每对的上次同步状态（卡片展示） |
+| `file_state` | pair_id, rel_path, size, mtime, PK(pair_id, rel_path) | 上次同步后的文件快照（统计/差分基线） |
+
+## 同步算法（一次执行）
+
+```
+1. 可用性检查：目标盘符是否存在？否 → 记录日志 status=skipped("目标不可用")，结束等待下次触发
+2. 扫描源目录（walkdir + 目录级过滤剪枝）→ src_map
+3. 扫描目标目录（同样过滤）→ dst_map
+   （开启「快速扫描」且该文件夹对上次同步 status=ok 时跳过本步：
+     dst_map 取上次成功同步的 file_state 快照——复制会把目标大小/mtime 对齐源，
+     快照即可代表目标状态；目标端外部手工增删在下次完整扫描前不可见）
+4. 对比：
+     - rel ∈ src 且 ∉ dst                → change(add)
+     - rel ∈ src ∩ dst，大小或 mtime 不同 → change(update)；（mtime+size 相同且开启哈希 → SHA-256 不同则 update）
+     - rel ∈ dst 且 ∉ src（且未被 exclude）→
+         deletePolicy=mirror   → change(delete)
+         deletePolicy=versioned → change(versioned)（移动到版本备份目录）
+         deletePolicy=addOnly  → 跳过（skipped++）
+5. 预览模式：返回 change list 结束（最多返回前 1000 条明细，counts 仍按全量统计；前端 >200 行窗口化虚拟滚动）
+   执行模式：按「复制线程数」并行执行（线程=1 或变更很少时顺序执行），每个文件失败自动重试 3 次
+   进度条支持暂停/恢复（文件粒度等待，恢复后继续；速度与剩余时间实时显示）
+6. add/update：先复制到 <dest>/<rel>.vinesync.tmp → 校验大小 → set_mtime(源mtime)
+   （「复制后深度校验」开启时：回读目标与源比对 SHA-256，不一致自动重试）
+7. update 且策略为 versioned/addOnly 且「覆盖前备份」开启：此时才把旧文件移动到版本备份目录
+   （文件名时间戳用可配置格式 versionTimestampFormat，非法字符自动剔除；
+     超出「每文件保留份数」时按 mtime 裁掉最旧的）→ 原子改名覆盖
+   （钩子失败则清理暂存文件、目标原样保留，消除「先移旧后复制」的失败窗口）
+8. delete：直接删除（仅 mirror 策略会走到这一步）
+9. 同步完成后按「保留天数」自动清理过期版本备份（失败仅记日志，不影响同步结果）
+10. 更新 file_state / pair_state 快照，写 sync_log，广播事件，按设置弹通知
+11. 本轮全部文件夹对成功（无失败、目标盘可用、至少执行一对）后执行「同步后动作」：
+    执行脚本（.ps1 → PowerShell / .bat/.cmd → cmd /C，启动失败仅记日志）或延迟 60 秒关机（shutdown /a 可取消）
+```
+
+## 目录结构
+
+```
+vineSync/
+├── README.md
+├── package.json / vite.config.ts / tsconfig*.json
+├── src/                        # 前端（React + TS）
+│   ├── main.tsx / App.tsx      # 入口、路由（主页/设置/历史）、I18nProvider、扫描进度
+│   ├── i18n.tsx                # 中英字典 + Context + 状态/触发/变更标签助手
+│   ├── api.ts / types.ts       # invoke 封装、共享类型
+│   ├── styles/                 # 主题变量与全局样式
+│   └── components/             # PairCard / PairEditor / PreviewModal / SettingsView / HistoryView
+├── src-tauri/                  # 后端（Rust / Tauri 2）
+│   ├── Cargo.toml / tauri.conf.json / capabilities/
+│   ├── icons/                  # 应用图标
+│   └── src/
+│       ├── main.rs / lib.rs    # 入口、setup（便携目录/语言/自启动）、单实例、托盘
+│       ├── msg.rs              # 后端消息中英双语（全局语言状态）
+│       ├── commands.rs         # 前端可调用的命令（含 get_app_info）
+│       ├── model.rs            # 配置与 DTO 类型
+│       ├── core/               # filter / scan / diff / copy / version
+│       ├── runtime.rs          # 同步协调（互斥、排队、进度/扫描事件、通知）
+│       ├── trigger.rs          # 定时调度、实时监控（notify + 防抖）
+│       └── storage/            # config.json + SQLite + paths.rs（便携模式解析）
+├── tools/
+│   ├── gen-icons.mjs           # 图标生成
+│   ├── package-portable.mjs    # 便携版 stage + zip 打包
+│   └── e2e-smoke.ps1           # E2E 冒烟（完全隔离：portable 舞台，不碰真实数据/不杀在用进程）
+└── docs/                       # 设计文档、截图
+```
+
+## 开发与构建
+
+```powershell
+# 环境：Rust (stable-msvc)、Node 18+、WebView2、MSVC 构建工具
+npm install
+
+# 开发（前后端热更新）
+npm run tauri dev
+
+# 前端类型检查与构建
+npm run typecheck
+npm run build
+
+# 打包（NSIS 安装包 + MSI 安装包）
+npm run tauri build
+
+# 便携版（免安装 zip：需先 tauri build）
+npm run package:portable        # → dist-portable/vinesync-portable-v<ver>.zip
+                                # 保护：正在运行的便携实例会拒绝打包；已有 portable_data 保留不删、不进 zip
+
+# E2E 冒烟（定时同步回归 + 英文消息 + 单实例 + 开机自启动注册表，约 90 秒）
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\e2e-smoke.ps1
+# 完全隔离：数据落在 .testdata\app\portable_data，不碰 %APPDATA% 真实数据；
+# vineSync 已在运行时跳过（exit 2，绝不杀用户进程）；HKCU Run 值测试后原样还原
+```
+
+> 打包时 tauri 会从 GitHub 自动下载 NSIS / WiX 工具链并缓存到 `%LOCALAPPDATA%\tauri`（NSIS、WixTools314），
+> 带 SHA1/SHA256 校验。若本机网络无法直连 GitHub，可先手动下载对应文件解压到该目录（文件哈希需与
+> tauri-bundler 内置值一致），即可离线复用缓存；缓存有效后后续打包无需再下载。
+
+
+## 错误处理与边界情况
+
+| 场景 | 处理 |
+| --- | --- |
+| F 盘拔出/不可用 | 跳过本次、日志 `目标不可用`，恢复后下次触发自动补同步 |
+| 同步中拔盘/复制失败 | 该文件记为 failed，继续其余文件，汇总进日志与通知；残留 `*.vinesync.tmp` 下次扫描时清理或覆盖 |
+| 源文件同步中被占用 | 复制失败自动重试 3 次（递增延迟），仍失败则记 failed，不中断整批 |
+| 源与目标路径相同/包含 | 添加文件夹对时校验拒绝 |
+| 目标选成盘符根目录（如 `F:\`） | 校验与预览/同步运行时均拒绝（防止把目标盘根下全部既有文件纳入删除/版本备份计划）；整盘对整盘备份（源也是盘符根）放行 |
+| 重名冲突（不同大小写） | Windows 不区分大小写，按规范化路径（小写）作为 key 对比 |
+| 重复触发 | 同步执行互斥；执行期间的新触发合并为一次「待同步」 |
+| 版本备份膨胀 | 同步完成后按「保留天数」自动清理；设置页可手动一键清理 |
+
+## 已知问题与修复计划
+
+### 本轮已修复（2026-10-09）
+
+| # | 问题 | 影响 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 版本备份只增不减：`version::cleanup` 仅由设置页手动按钮触发，`保留天数` 配置不会自动生效 | 高频覆盖/删除场景下版本备份无限膨胀 | 每次同步完成后自动执行过期清理（清理失败不影响同步结果）；`保留天数` 校验收紧为 1–3650 |
+| 2 | 预览全量返回并渲染变更列表：数万条变更时 JSON 巨大、DOM 卡死 | 大目标（如误选整盘）预览界面假死 | 后端截断返回前 1000 条（counts 仍按全量统计），前端显示「仅显示前 N 条，共 M 条，确认后仍同步全部」提示 |
+| 3 | 覆盖前先移版本的失败窗口：Update 先把旧文件移入版本备份、再复制新文件，复制失败期间主备份区缺该文件 | 极低（下次同步自愈）但顺序可优化 | 改为「复制暂存 → 校验 → 移旧文件入版本备份 → 最后原子改名」，新增 `safe_copy` 钩子版本，钩子失败时清理暂存、目标原样 |
+
+### 保留现状（已评估，暂不修改）
+
+| 问题 | 结论 |
+| --- | --- |
+| 实时监控事件路径与配置路径的前缀匹配 | notify 以注册时的源路径拼接事件，前缀大小写天然一致，非问题 |
+| FAT32/部分网络盘 mtime 回写精度舍入可能触发重复复制 | NTFS 不受影响；「时间容差」属新特性暂缓 |
+| 可选卷影副本（VSS）复制被占用文件 | 2026-10-09 决定暂不做：系统侵入型、需管理员权限与大量边界处理；复制失败已有 3 次重试兜底 |
+| 单个文件名组件接近 255 字符时 `.vinesync.tmp` 暂存后缀可能超限 | 极罕见边界；失败会进入重试与失败计数，不中断同步 |
+
+### 借鉴 FreeFileSync 的优化清单（按优先级）
+
+- [x] 多线程并行复制（`copyThreads` 1–16 可设、默认 4；变更少于线程数×2 时自动回退顺序执行）
+- [x] 复制失败自动重试（最多 3 次尝试、递增延迟）
+- [x] 版本策略细化：「覆盖前备份」「源删除时备份」分别开关 + 每文件最大份数上限（0=不限，超出裁最旧）
+- [x] 版本命名方案自定义（时间戳格式可配）：`versionTimestampFormat`（chrono 串，1~64 字符、非法字符剔除、份数裁剪按 mtime 取最旧）
+- [x] 预览列表虚拟滚动/分页（配合问题 2 的截断，大列表不再卡顿）：>200 行窗口化渲染，独立滚动容器 + 首行实测行高，上下 overscan 12 行，斑马纹按绝对行号保持稳定
+- [x] 过滤器测试器（编辑器内输入样例相对路径，即时显示是否参与同步及原因）
+- [x] 同步完成后的动作（执行脚本/关机）：全部成功才执行；`.ps1` 走 PowerShell、`.bat/.cmd` 走 cmd /C；关机延迟 60 秒（`shutdown /a` 可取消）
+- [x] 进度增强：速度（同步字节/秒与文件/秒、扫描文件/秒，EMA 平滑）、ETA（按文件速率估算剩余时间）
+- [x] 进度可暂停/恢复（文件粒度等待，`set_sync_paused` 命令，新一次同步自动清除暂停态）
+- [x] 日志导出 CSV（历史页一键导出：保存对话框 + UTF-8 BOM、RFC 4180 转义，Excel 可直接打开）
+- [x] 按文件夹对独立计划：`intervalMinutes` 覆盖（1～10080 分钟，编辑器可设，留空用全局间隔，独立时钟）
+- [x] 复制后深度校验（回读哈希）：`verifyAfterCopy` 开启时回读目标与源比对 SHA-256，不一致自动重试
+- [x] 符号链接/目录联接/硬链接专项验证（实测 Rust 对 junction 亦返回 `is_symlink()==true` → 扫描一律剪枝；环形联接探针防止外部目录树/死递归被纳入备份；硬链接按独立普通文件对待）
+- [x] 超长路径（>260，MAX_PATH）支持：`to_long_path` 把根路径转 verbatim（`\\?\D:\…`、UNC → `\\?\UNC\…`），扫描/复制/版本清理全覆盖；深层扫描+复制测试覆盖
+
+## 开发进度
+
+- [x] 项目初始化、需求整理、技术选型定稿（README）
+- [x] UI 原型与界面框架（Tauri 2 + React + TS 脚手架、主题与布局）
+- [x] 同步引擎（镜像对比 + 安全复制 + 过滤器）
+- [x] 删除策略与版本备份（A/B/C + 按天数清理）
+- [x] 手动 / 定时 / 实时触发（含目标盘可用性检查与防抖）
+- [x] 同步预览与日志通知（SQLite 历史 + 托盘/系统通知）
+- [x] 端到端功能验证（定时触发、过滤器、覆盖/删除传播、版本备份、SQLite 日志，E2E 脚本全项通过）
+- [x] 打包发布（NSIS 安装包 2.10 MiB + MSI 安装包 2.86 MiB，2026-10-08 构建通过；签名与自动更新待定）
+- [x] 开机自启动开关（配置 ↔ HKCU Run，启动时对齐；E2E 验证注册表写入/清理）
+- [x] 单实例锁（重复启动激活已有窗口；E2E 验证第二实例退出）
+- [x] 数据目录可视化（设置页：数据目录/程序路径/版本/便携标识，`get_app_info`）
+- [x] 网络路径（UNC/NAS）完善（share 根探测 + 8 秒超时线程化）
+- [x] 多语言中英双语（前端 i18n + 后端 msg.rs，含通知/托盘/校验提示；E2E 验证英文同步消息）
+- [x] 大目录扫描进度（`scan-progress` 250ms 节流事件 + 前端进度条）
+- [x] 便携版免安装（`vinesync.portable` 标记 + `portable_data` + `package:portable` zip；冒烟验证数据不落 %APPDATA%）
+- [x] 扫描容错（权限拒绝子树自动跳过继续扫描；保留 `$RECYCLE.BIN`/`System Volume Information`；源端不可见路径同步剪除目标清单，防镜像策略误删目标副本；icacls 权限测试覆盖）
+- [x] 默认窗口调整为 1280×800（最小 1024×640，居中）
+- [x] 版本备份自动清理（同步完成后按保留天数执行，失败不影响同步；保留天数校验收紧 1–3650）
+- [x] 预览截断（后端最多返回 1000 条明细、计数与传输量仍按全量统计，前端提示截断）
+- [x] 覆盖顺序优化（暂存校验 → 移旧文件入版本备份 → 原子改名，消除失败窗口；`safe_copy_hook` 测试覆盖）
+- [x] 多线程并行复制与失败重试（`copyThreads` 1–16 默认 4，设置页可调；每文件失败自动重试 3 次；并行/失败路径与配置校验测试覆盖）
+- [x] 版本策略细化（「覆盖前备份」「源删除时备份」开关、每文件份数上限裁剪；只读文件备份后 mtime 强制刷新防误删；diff/裁剪/只读 mtime 测试覆盖）
+- [x] 过滤器测试器（`test_filter` 命令：保留目录→排除→包含四态判定，编辑器即时测试）
+- [x] 进度速度与 ETA（`ProgressEvt.bytes` 累计传输量；前端 EMA 速率 + 剩余时间估算，扫描进度显示速率）
+- [x] 历史日志导出 CSV（`export_history` 命令 + 历史页「导出 CSV」按钮；BOM/转义/表头测试覆盖）
+- [x] 预览列表虚拟滚动（>200 行窗口化渲染，独立滚动容器、实测行高、绝对索引斑马纹）
+- [x] 进度暂停/恢复（`Syncer.paused` + 文件粒度等待，进度条暂停按钮与「已暂停」状态）
+- [x] 同步后动作（`afterSyncAction` 脚本/关机：扩展名选择启动方式、60 秒关机宽限；脚本启动测试覆盖）
+- [x] 版本时间戳自定义（`versionTimestampFormat` 校验 + 非法字符剔除 + 份数裁剪改按 mtime；自定义格式测试覆盖）
+- [x] 按文件夹对独立定时（`intervalMinutes` 覆盖 + 调度线程独立时钟；设置页深度校验开关与同步后动作、时间戳格式）
+- [x] 差分扫描（`diffScan`：上次同步 status=ok 时目标清单取 `file_state` 快照、跳过目标目录遍历；`load_file_state` 快照往返测试覆盖）
+- [x] 大目录性能优化（`sync_file_state` 增量快照：新旧比对仅写差异，旧表为空走整表替换，免整表 DELETE+重灌；扫描回调 last-rel 复用缓冲零分配；文件级 `rel_of` 由 filter_entry 与主循环双份合并为单份——权限/保留目录/临时文件/过滤语义测试全部保持）
+- [x] 链接与超长路径专项（符号链接/junction/硬链接剪枝行为回归锁定；`to_long_path` verbatim 根使 >260 深层目录可扫描、可复制、可清理版本备份）
+- [x] 全量回归（`cargo test` 46 项、typecheck、E2E、NSIS 安装/卸载冒烟、便携版冒烟全部通过；`.cargo/config.toml` 固定测试 4 线程——16 线程并发临时文件 I/O 触发 Defender 扫描风暴使全套测试劣化至 ~60s，4 线程稳定 ~5s）
+- [ ] 后续优化：代码签名与自动更新（需代码签名证书与更新分发服务器，外部资源就绪后进行）
+
+## 许可
+
+VineTurtleStudio 内部项目。

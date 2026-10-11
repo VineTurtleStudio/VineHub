@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicktomlin/tauri-v2/main/crates/tauri-config-schema/schema.json",
+  "productName": "vineCurator",
+  "version": "0.1.0",
+  "identifier": "com.vineturtle.vinecurator",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5175",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "vineCurator - 本地媒体资产管理器",
+        "width": 1500,
+        "height": 950,
+        "minWidth": 1100,
+        "minHeight": 700,
+        "resizable": true,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}
