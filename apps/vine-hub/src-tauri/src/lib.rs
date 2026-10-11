@@ -24,6 +24,8 @@ pub struct AppState {
     pub store: Mutex<Store>,
     pub sidecars: Mutex<SidecarManager>,
     pub pulse_scans: Mutex<HashMap<String, PulseScan>>,
+    /// sidecar stderr 日志落盘目录（`{data_dir}/logs`）。
+    pub logs_dir: PathBuf,
 }
 
 /// 开发期仓库内 `plugins/` 目录（安装版不存在时回退 app data 目录）。
@@ -59,11 +61,16 @@ pub fn run() {
                 .scan()
                 .map_err(|e| format!("扫描插件目录失败: {e}"))?;
 
+            let logs_dir = data_dir.join("logs");
+            std::fs::create_dir_all(&logs_dir)
+                .map_err(|e| format!("无法创建日志目录 {}: {e}", logs_dir.display()))?;
+
             app.manage(AppState {
                 registry: Mutex::new(registry),
                 store: Mutex::new(store),
                 sidecars: Mutex::new(SidecarManager::new()),
                 pulse_scans: Mutex::new(HashMap::new()),
+                logs_dir,
             });
             Ok(())
         })

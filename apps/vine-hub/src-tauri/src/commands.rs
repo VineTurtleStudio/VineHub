@@ -363,6 +363,7 @@ fn ensure_sidecar(state: &crate::AppState, plugin_id: &str) -> Result<Arc<Sideca
     config.expected_api_version = api_version;
     config.handshake_timeout = Duration::from_secs(5);
     config.request_timeout = Duration::from_secs(30);
+    config.log_dir = Some(state.logs_dir.clone());
     sidecars.spawn(config).map_err(|e| format!("拉起 sidecar 失败: {e}"))
 }
 

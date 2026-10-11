@@ -178,10 +178,91 @@ fn request_with_ack_timeout_cleans_pending() {
 #[test]
 fn stderr_log_is_captured() {
     let mut manager = SidecarManager::new();
-    // 夹具不写 stderr，但通道应可用且为空
+    // 夹具启动即写一行 stderr，通道应可捕获
     let config = SidecarConfig::new("vine.fake", fake_plugin_exe());
     let handle = manager.spawn(config).unwrap();
-    std::thread::sleep(Duration::from_millis(50));
-    let _log = handle.take_stderr_log();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let log = handle.take_stderr_log();
+        if log.iter().any(|l| l.contains("started")) {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("2s 内未捕获到 started 日志行: {log:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(handle.is_running());
+}
+
+#[test]
+fn heartbeat_kills_hung_plugin() {
+    let mut manager = SidecarManager::new();
+    let mut config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    config.heartbeat_interval = Duration::from_millis(150);
+    config.ping_timeout = Duration::from_millis(200);
+    config.heartbeat_max_misses = 3;
+    config.request_timeout = Duration::from_millis(200);
+    let handle = manager.spawn(config).expect("握手应成功");
+    assert!(handle.is_running());
+
+    // hang 卡死主循环 → 后续 ping 无响应 → 心跳判定假死击杀
+    let _ = handle.request("hang", None);
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while handle.is_running() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!handle.is_running(), "假死插件应被心跳击杀");
+
+    // 击杀后请求快速失败（不干等超时）
+    let started = Instant::now();
+    let err = handle.request("echo", None).unwrap_err();
+    assert!(matches!(err, SidecarError::NotRunning), "得到 {err:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "击杀后请求应立即失败"
+    );
+
+    // 重拉可用（宿主重试路径）
+    let mut config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    config.heartbeat_interval = Duration::ZERO;
+    let fresh = manager.spawn(config).expect("重拉应成功");
+    assert!(fresh.is_running());
+}
+
+#[test]
+fn heartbeat_disabled_by_zero_interval() {
+    let mut manager = SidecarManager::new();
+    let mut config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    config.heartbeat_interval = Duration::ZERO;
+    let handle = manager.spawn(config).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(handle.is_running(), "关闭心跳时不应有击杀动作");
+}
+
+#[test]
+fn stderr_log_written_to_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut manager = SidecarManager::new();
+    let mut config = SidecarConfig::new("vine.fake", fake_plugin_exe());
+    config.heartbeat_interval = Duration::ZERO;
+    config.log_dir = Some(dir.path().to_path_buf());
+    let handle = manager.spawn(config).unwrap();
+
+    let log_path = dir.path().join("vine.fake.log");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if log_path.is_file() {
+            let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if content.contains("started") {
+                break;
+            }
+        }
+        if Instant::now() > deadline {
+            panic!("2s 内日志文件未写入 started 行");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    handle.kill();
 }

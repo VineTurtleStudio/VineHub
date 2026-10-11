@@ -78,10 +78,18 @@ pub struct SidecarConfig {
     pub request_timeout: Duration,
     /// 握手（plugin.info）超时。
     pub handshake_timeout: Duration,
+    /// 心跳间隔；`Duration::ZERO` 关闭心跳。
+    pub heartbeat_interval: Duration,
+    /// 单次心跳 ping 超时。
+    pub ping_timeout: Duration,
+    /// 连续丢心跳次数达到该值 → 判定假死并击杀。
+    pub heartbeat_max_misses: u32,
+    /// stderr 日志落盘目录（`{plugin_id}.log`）；`None` 只保留内存环。
+    pub log_dir: Option<PathBuf>,
 }
 
 impl SidecarConfig {
-    /// 默认以 `--rpc` 参数启动，请求超时 10s，握手 5s。
+    /// 默认以 `--rpc` 参数启动，请求超时 10s，握手 5s，心跳 15s×3 次。
     pub fn new(plugin_id: impl Into<String>, exe: impl Into<PathBuf>) -> Self {
         Self {
             plugin_id: plugin_id.into(),
@@ -91,6 +99,10 @@ impl SidecarConfig {
             expected_api_version: HOST_API_VERSION.to_string(),
             request_timeout: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
+            heartbeat_interval: Duration::from_secs(15),
+            ping_timeout: Duration::from_secs(2),
+            heartbeat_max_misses: 3,
+            log_dir: None,
         }
     }
 }
@@ -118,6 +130,9 @@ pub struct SidecarHandle {
     notifications: Mutex<Receiver<RpcRequest>>,
     stderr_log: Arc<Mutex<Vec<String>>>,
     request_timeout: Duration,
+    ping_timeout: Duration,
+    /// Job Object：宿主进程退出时 OS 级回收 sidecar（孤儿清理）。
+    _job: JobHandle,
     /// 握手返回的信息。
     pub info: PluginInfo,
 }
@@ -225,6 +240,21 @@ impl SidecarHandle {
         write_line(&self.stdin, &line)
     }
 
+    /// 心跳 ping（短超时）。
+    fn ping(&self) -> Result<Value, SidecarError> {
+        if !self.is_running() {
+            return Err(SidecarError::NotRunning);
+        }
+        send_request(
+            &self.stdin,
+            &self.pending,
+            &self.next_id,
+            method::PING,
+            None,
+            self.ping_timeout,
+        )
+    }
+
     /// 强杀进程树（taskkill /T，失败回退直接 kill）并回收。
     pub fn kill(&self) {
         let mut child = self.child.lock().unwrap();
@@ -273,6 +303,7 @@ impl SidecarManager {
         }
 
         let mut child = command.spawn().map_err(SidecarError::Spawn)?;
+        let job = JobHandle::assign(&child);
         let stdin = child.stdin.take().expect("stdin 已 piped");
         let stdout = child.stdout.take().expect("stdout 已 piped");
         let stderr = child.stderr.take().expect("stderr 已 piped");
@@ -282,7 +313,11 @@ impl SidecarManager {
         let (notif_tx, notif_rx) = channel::<RpcRequest>();
 
         spawn_reader_thread(stdout, pending.clone(), notif_tx);
-        spawn_stderr_thread(stderr, stderr_log.clone());
+        let log_file = config
+            .log_dir
+            .as_ref()
+            .and_then(|dir| open_log_file(dir, &config.plugin_id));
+        spawn_stderr_thread(stderr, stderr_log.clone(), log_file);
 
         let stdin = Mutex::new(stdin);
         let child = Mutex::new(child);
@@ -354,8 +389,43 @@ impl SidecarManager {
             notifications: Mutex::new(notif_rx),
             stderr_log,
             request_timeout: config.request_timeout,
+            ping_timeout: config.ping_timeout,
+            _job: job,
             info,
         });
+
+        // 心跳线程：连续丢 ping 达上限 → 判定假死，击杀并回收 pending
+        if !config.heartbeat_interval.is_zero() {
+            let weak = Arc::downgrade(&handle);
+            let interval = config.heartbeat_interval;
+            let max_misses = config.heartbeat_max_misses.max(1);
+            std::thread::spawn(move || {
+                let mut misses = 0u32;
+                loop {
+                    std::thread::sleep(interval);
+                    let Some(h) = weak.upgrade() else { break };
+                    if !h.is_running() {
+                        break;
+                    }
+                    match h.ping() {
+                        Ok(_) => misses = 0,
+                        Err(SidecarError::NotRunning) => break,
+                        Err(_) => {
+                            misses += 1;
+                            if misses >= max_misses {
+                                eprintln!(
+                                    "[vine-host] sidecar {} 心跳连续失败 {misses} 次，判定假死并击杀",
+                                    h.plugin_id
+                                );
+                                h.kill();
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         self.handles.insert(config.plugin_id.clone(), handle.clone());
         Ok(handle)
     }
@@ -518,17 +588,107 @@ fn spawn_reader_thread(
     });
 }
 
-fn spawn_stderr_thread(stderr: std::process::ChildStderr, log: Arc<Mutex<Vec<String>>>) {
+fn spawn_stderr_thread(
+    stderr: std::process::ChildStderr,
+    log: Arc<Mutex<Vec<String>>>,
+    mut file: Option<std::fs::File>,
+) {
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
             let Ok(line) = line else { break };
-            let mut log = log.lock().unwrap();
-            // 简单环形上限，防无限增长
-            if log.len() >= 1000 {
-                log.remove(0);
+            {
+                let mut log = log.lock().unwrap();
+                // 简单环形上限，防无限增长
+                if log.len() >= 1000 {
+                    log.remove(0);
+                }
+                log.push(line.clone());
             }
-            log.push(line);
+            if let Some(f) = file.as_mut() {
+                use std::io::Write;
+                let _ = writeln!(f, "{line}");
+                let _ = f.flush();
+            }
         }
     });
+}
+
+fn open_log_file(dir: &std::path::Path, plugin_id: &str) -> Option<std::fs::File> {
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join(format!("{plugin_id}.log"));
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+}
+
+/// Windows Job Object：`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。
+/// 宿主进程（无论正常退出还是崩溃）关闭句柄时，OS 强制回收全部 sidecar 子进程，
+/// 杜绝「宿主死了 sidecar 还活着」的孤儿局面。
+/// HANDLE 以 usize 存放（Send+Sync）；仅 Drop 时 CloseHandle 一次。
+#[derive(Debug)]
+pub struct JobHandle(Option<usize>);
+
+impl JobHandle {
+    fn assign(child: &Child) -> Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            };
+
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    return Self(None);
+                }
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let ok = SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+                if ok == 0 {
+                    use windows_sys::Win32::Foundation::CloseHandle;
+                    CloseHandle(job);
+                    return Self(None);
+                }
+                let ok = AssignProcessToJobObject(job, child.as_raw_handle() as _);
+                if ok == 0 {
+                    use windows_sys::Win32::Foundation::CloseHandle;
+                    CloseHandle(job);
+                    return Self(None);
+                }
+                Self(Some(job as usize))
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            Self(None)
+        }
+    }
+}
+
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            if let Some(handle) = self.0 {
+                use windows_sys::Win32::Foundation::CloseHandle;
+                unsafe { CloseHandle(handle as *mut _) };
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            // 非 Windows：Drop 靠 SidecarHandle::kill 的进程树回收
+        }
+    }
 }

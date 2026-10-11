@@ -5,6 +5,7 @@
 //! - `echo`：原样返回 params
 //! - `progress.demo`：先发 2 条 `task.progress` 通知，再回终态
 //! - `block`：永不响应（测超时）
+//! - `hang`：卡死主循环不响应任何请求（测假死 → 心跳击杀）
 //! - `crash`：立即退出（测崩溃路径）
 
 use std::io::{BufRead, Write};
@@ -17,6 +18,7 @@ use vine_plugin_api::{
 };
 
 fn main() {
+    eprintln!("[vine-fake] started");
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
@@ -42,6 +44,7 @@ fn main() {
                         "progress".into(),
                         "scan".into(),
                         "block".into(),
+                        "hang".into(),
                         "crash".into(),
                     ],
                 };
@@ -107,6 +110,10 @@ fn main() {
             "block" => {
                 // 永不响应（另起线程，避免卡住主循环），等待宿主超时后被杀
                 std::thread::spawn(|| std::thread::sleep(Duration::from_secs(3600)));
+            }
+            "hang" => {
+                // 卡死主循环：不再读 stdin → 心跳 ping 无响应 → 宿主判定假死击杀
+                std::thread::sleep(Duration::from_secs(3600));
             }
             "crash" => {
                 std::process::exit(1);
