@@ -35,6 +35,8 @@ pub mod method {
     pub const LIBRARY_SCAN: &str = "library.scan";
     /// vineCurator 全文检索。
     pub const SEARCH_ITEMS: &str = "search.items";
+    /// VinePalmaCursor 格式转换（图片/cur/ani → cur 或 ani）。
+    pub const FILE_CONVERT: &str = "file.convert";
     /// 取消任务（通知）。
     pub const TASK_CANCEL: &str = "task.cancel";
     /// 进度通知。

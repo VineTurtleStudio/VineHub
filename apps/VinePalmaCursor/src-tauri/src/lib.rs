@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod commands;
+pub mod rpc;
 
 pub fn run() {
     tauri::Builder::default()

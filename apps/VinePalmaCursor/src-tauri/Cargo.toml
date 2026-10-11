@@ -11,6 +11,7 @@ tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "bmp", "jpeg"] }
+vine-plugin-api = { workspace = true }
 
 [lib]
 name = "vine_palma_cursor_lib"
