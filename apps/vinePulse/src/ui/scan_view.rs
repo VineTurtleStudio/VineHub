@@ -502,6 +502,10 @@ impl ScanState {
             // 仅封顶自动增长，仍可手动拖动到 400（超出部分 hover 显示完整路径）。
             .max_size(400.0)
             .show(ui, |ui| {
+                // 强制内容铺满面板主轴宽度：egui 的 PanelState 存的是内容派生 rect
+                // （Frame::show 返回 content_ui.min_rect()），内容不满宽时会把窄宽度
+                // 存下、松手即回弹。铺满后存的就是拖动宽度，得以保持。
+                ui.set_min_width(ui.max_rect().width());
                 ui.add_space(4.0);
                 ui.heading("扫描目标");
                 ui.add_space(2.0);
