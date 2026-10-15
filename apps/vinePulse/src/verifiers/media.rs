@@ -1492,13 +1492,28 @@ fn find_flac_frame_end(d: &[u8], start: usize, hlen: usize) -> Option<usize> {
     None
 }
 
+/// 结构遍历的大小上限（整读进内存做逐帧 CRC 检查，超过则不整读）；
+/// 超过的文件在勾选「强制深度解码」时改走流式全量 MD5（不占内存）。
+const FLAC_STRUCTURAL_LIMIT: u64 = 512 * 1024 * 1024;
+
 fn verify_flac(path: &Path, size: u64, opts: &Opts, report: &mut Report) {
-    if size > 512 * 1024 * 1024 {
-        report.push(Finding::unknown(
-            "FLAC_TOO_LARGE",
-            "文件超过 512 MiB，跳过结构遍历",
-            None,
-        ));
+    if size > FLAC_STRUCTURAL_LIMIT {
+        if opts.deep {
+            // 强制深度解码：GB 级整轨不适合整读进内存做结构遍历，但流式全量
+            // 解码 MD5 是金标准且内存恒定——只读头部拿 STREAMINFO 期望值即可。
+            let stored = read_head_streaminfo_md5(path);
+            verify_flac_md5(path, size, opts, stored, report);
+        } else {
+            // 未执行不等于有问题（对齐 BATON「未启用的检查不算问题」）：
+            // 降为 Ok 级说明，详情仍可见；勾选「强制深度解码」可做全量 MD5。
+            report.push(Finding::ok(
+                "FLAC_TOO_LARGE",
+                format!(
+                    "文件 {size} 字节超过 {} MiB，跳过结构遍历与 MD5 校验（可在设置勾选「强制深度解码」做全量 MD5）",
+                    FLAC_STRUCTURAL_LIMIT / (1024 * 1024)
+                ),
+            ));
+        }
         return;
     }
     let data = match std::fs::read(path) {
@@ -1677,26 +1692,18 @@ fn verify_flac_md5(path: &Path, size: u64, opts: &Opts, stored: Option<[u8; 16]>
         return;
     };
 
-    // 超过深度解码阈值只是「没做完整 MD5 校验」，不是文件有问题。结构层已通过，
-    // 故降为 Ok 级说明性提示：详情面板/报告仍可见，但不再把结论拖成可疑/未知。
-    if !opts.should_deep(size) {
-        report.push(Finding::ok(
-            "FLAC_MD5_TOO_LARGE",
-            format!(
-                "文件 {size} 字节超过深度解码阈值 {}，未做完整 MD5 校验（结构校验已通过；可在设置里调大阈值或强制深度解码）",
-                opts.max_deep_size
-            ),
-        ));
-        return;
-    }
-
-    let computed = match decode_flac_md5(path) {
+    // 不受深度解码大小阈值限制：结构校验已通过，完整 MD5 是金标准，对齐
+    // FlacValidator 的全量解码口径（整轨 FLAC 也应享受）。只有 512 MiB 安全
+    // 上限；超过上限只是「没做完整 MD5 校验」，不是文件有问题，故为 Ok 级说明。
+    // 解码是流式的（内存与文件大小无关），用户勾选「强制深度解码」(-d) 可忽略上限。
+    let computed = match decode_flac_md5(path, opts.deep) {
         Ok(computed) => computed,
         Err(FlacDecodeError::TooLarge) => {
             report.push(Finding::ok(
                 "FLAC_MD5_TOO_LARGE",
                 format!(
-                    "文件 {size} 字节超过硬上限 {FLAC_MD5_HARD_LIMIT}，未做完整 MD5 校验（结构校验已通过）",
+                    "文件 {size} 字节超过硬上限 {} MiB，未做完整 MD5 校验（结构校验已通过；勾选「强制深度解码」可忽略上限）",
+                    FLAC_MD5_HARD_LIMIT / (1024 * 1024)
                 ),
             ));
             return;
@@ -1752,8 +1759,8 @@ impl std::fmt::LowerHex for Hex<'_> {
 /// RFC 9639 规定 MD5 的输入是"所有声道、按样本交错、有符号小端表示"的字节流；
 /// 位深不是整数字节时样本符号扩展到下一个整字节数。这里对齐 libFLAC 的
 /// `format_input_`，与 `flac -t` / FlacValidator 的比对口径完全一致。
-/// 深度解码 MD5 的硬上限：即便 `--deep` 强制，也不解码超过该大小的文件，
-/// 防止误操作把机器拖死。用户要更高质量时走 ffmpeg 深度解码（受别的预算约束）。
+/// 深度解码 MD5 的默认硬上限：超过该大小的文件不做完整 MD5（Ok 级说明），
+/// 防止批量扫描被极端大文件拖死；勾选「强制深度解码」(`-d`) 时忽略此上限。
 const FLAC_MD5_HARD_LIMIT: u64 = 512 * 1024 * 1024;
 
 enum FlacDecodeError {
@@ -1765,7 +1772,7 @@ enum FlacDecodeError {
     DecodeFailed,
 }
 
-fn decode_flac_md5(path: &Path) -> Result<[u8; 16], FlacDecodeError> {
+fn decode_flac_md5(path: &Path, force: bool) -> Result<[u8; 16], FlacDecodeError> {
     use sha2::Digest as _;
     use symphonia::core::audio::Signal;
     use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
@@ -1774,7 +1781,8 @@ fn decode_flac_md5(path: &Path) -> Result<[u8; 16], FlacDecodeError> {
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
 
-    if let Ok(meta) = std::fs::metadata(path)
+    if !force
+        && let Ok(meta) = std::fs::metadata(path)
         && meta.len() > FLAC_MD5_HARD_LIMIT
     {
         return Err(FlacDecodeError::TooLarge);
@@ -1855,6 +1863,25 @@ fn streaminfo_md5(si: &[u8]) -> Option<[u8; 16]> {
         return None; // 未记录校验值
     }
     Some(md5)
+}
+
+/// 大文件强制深度解码时只读文件头取 STREAMINFO 的期望 MD5（避免为 16 字节
+/// 把 GB 级文件读进内存）。STREAMINFO 固定为第一个元数据块（type 0、长 34），
+/// 开头 42 字节内即可拿到。
+fn read_head_streaminfo_md5(path: &Path) -> Option<[u8; 16]> {
+    use std::io::Read as _;
+
+    let mut f = File::open(path).ok()?;
+    let mut buf = [0u8; 4 + 4 + 34];
+    f.read_exact(&mut buf).ok()?;
+    if &buf[0..4] != b"fLaC" || buf[4] & 0x7F != 0 {
+        return None;
+    }
+    let len = (usize::from(buf[5]) << 16) | (usize::from(buf[6]) << 8) | usize::from(buf[7]);
+    if len < 34 {
+        return None;
+    }
+    streaminfo_md5(&buf[8..])
 }
 
 fn check_streaminfo(si: &[u8], report: &mut Report, offset: u64) {

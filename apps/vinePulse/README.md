@@ -42,7 +42,8 @@ vine-pulse [选项] <文件或目录>...
                                同名 sidecar（如 a.zip.sha256）比对
   -j, --json <输出文件>        导出 JSON 报告
   -d, --deep                   强制深度解码（超过大小阈值的文件也解码）
-      --max-deep-size <MB>     深度解码大小阈值（默认 64；小于等于该值总是深度解码）
+      --max-deep-size <MB>     深度解码大小阈值（默认 64；小于等于该值总是深度解码；
+                               FLAC MD5 校验不受此限，≤512 MiB 一律全量，-d 可忽略上限）
   -q, --quiet                  仅输出有问题的文件
       --entropy-threshold <f>  低熵判定阈值（0~8，默认 0.5）
       --no-color               关闭彩色输出
@@ -68,6 +69,7 @@ vine-pulse [选项] <文件或目录>...
 - [x] **GUI 体验改造**（2026-10-15）：FlacValidator 模式流式显示问题文件 + 进度统计面板（失败/速度/ETA）+ 双击定位/右键菜单（定位/打开/复制路径）+ 默认「仅有问题」过滤 + 窗口紧凑化
 - [x] **第二轮改进**（2026-10-15）：修复 ID3v2 前缀的 FLAC 误判为 MP3（`detect_magic` 跳过 ID3 标签识别真实签名，`FileHint::probe` 按需扩窗）+ 结果表「首因」徽章列（悬停看完整问题列表）+ 大批量扫描卡顿修复（`Report.size` 由目录遍历携带、去掉每文件 `metadata()` stat 与每帧 `to_vec()` 深拷贝）+ 状态栏速度 EWMA 平滑
 - [x] **第三轮：完美检测**（2026-10-15）：FLAC 金标准校验——完整解码整段音频并按 RFC 9639 §8.2 计算 PCM MD5，与 STREAMINFO 存储值比对（等价 `flac -t` / FlacValidator）；阈值与 CLI `--max-deep-size` 可调；熵采样从头/中/尾 3 点改为全文件均匀 32 点
+- [x] **第四轮：降噪与行业对齐**（2026-10-15）：「未执行的检查」与「损坏」分离（对齐 BATON/存档行业惯例）——`FLAC_NO_MD5`/`FLAC_MD5_SKIPPED`/`FLAC_TOO_LARGE`/`LOW_ENTROPY` 均降为 Ok 级说明（详情仍可见，不再拖成未知/可疑）；FLAC MD5 取消 64 MiB 软阈值，≤512 MiB 一律全量解码金标准校验，>512 MiB 默认跳过、勾选「强制深度解码」(-d) 时改走**流式全量 MD5**（只读头部取 STREAMINFO，GB 级整轨不占内存）；新增 `REPEATED_FILL` 重复填充检测（无魔数文件 top-2 字节值占比 ≥90% → 可疑，补上低熵降级后的空档）
 
 ## 技术栈
 
@@ -96,7 +98,7 @@ vinePulse/
 │   │   ├── entropy.rs        # 通用熵分析（盲检辅助）
 │   │   └── walker.rs         # 目录遍历、并行扫描、进度/取消
 │   ├── verifiers/
-│   │   ├── generic.rs        # 空文件、魔数不符、截断、全零填充
+│   │   ├── generic.rs        # 空文件、魔数不符、全零/重复填充、低熵说明
 │   │   ├── image.rs          # PNG 块 CRC、JPEG marker + 解码
 │   │   ├── archive.rs        # ZIP 逐条 CRC、EOCD
 │   │   ├── media.rs          # [M2] MP4 box 树、AVI/WAV RIFF、MP3 帧链、FLAC CRC
@@ -148,7 +150,7 @@ trait Verifier {
 | 图片 | GIF/BMP/WebP | 结构解析 + 解码 |
 | 音视频 | MP4/MOV | box 树遍历、长度越界、stco/stsc 索引越界；有 ffprobe 时深度解码 |
 | 音视频 | WAV/AVI | RIFF 块遍历、fmt/data 一致性 |
-| 音视频 | MP3/FLAC/OGG | 帧链遍历、FLAC CRC16 帧校验、OGG 页 CRC；FLAC 另做全解码 + STREAMINFO MD5 金标准比对；symphonia 深度解码 |
+| 音视频 | MP3/FLAC/OGG | 帧链遍历、FLAC CRC16 帧校验、OGG 页 CRC；FLAC ≤512 MiB 一律全解码 + STREAMINFO MD5 金标准比对，更大的走 `-d` 流式全解码；symphonia 深度解码 |
 | 文档 | PDF | header、xref/trailer、`%%EOF`、对象结构 |
 | 文档 | DOCX/XLSX/PPTX/ODT | ZIP 中央目录 + 内部结构（mimetype、内容类型） |
 | 文档 | TXT/CSV 文本 | 编码有效性、非法字节序列 |
@@ -159,7 +161,7 @@ trait Verifier {
 | 数据 | SQLite | `PRAGMA quick_check`（rusqlite bundled） |
 | 数据 | CSV | 全量解析、列数一致性 |
 | 数据 | Parquet | `PAR1` 魔数 + footer 完整性 |
-| 通用 | 任意文件 | 空文件、魔数与扩展名不符、疑似截断、熵异常/全零填充、哈希清单比对 |
+| 通用 | 任意文件 | 空文件、魔数与扩展名不符、疑似截断、全零填充/重复填充（REPEATED_FILL）、熵异常（Ok 级说明）、哈希清单比对 |
 
 ## 桌面端功能
 
@@ -179,6 +181,7 @@ trait Verifier {
 5. [x] **GUI 体验改造**：流式问题文件 + 进度统计 + 双击定位/右键菜单 + 窗口优化（2026-10-15）
 6. [x] **第二轮改进**：ID3v2/FLAC 误判修复 + 首因徽章列 + 大批量扫描性能修复 + 速度平滑（2026-10-15）
 7. [x] **第三轮：完美检测**：FLAC 全解码 + STREAMINFO MD5 金标准比对 + 阈值可调 + 熵采样 32 点（2026-10-15）
+8. [x] **第四轮：降噪与行业对齐**：「未执行 ≠ 损坏」降噪 + FLAC MD5 取消软阈值（GB 整轨 `-d` 流式全解码）+ REPEATED_FILL 重复填充检测（2026-10-15）
 
 ## 测试策略
 

@@ -67,3 +67,34 @@ pub fn sample_file(path: &Path, size: u64) -> std::io::Result<Vec<u8>> {
 pub fn all_zero(sample: &[u8]) -> bool {
     !sample.is_empty() && sample.iter().all(|&b| b == 0)
 }
+
+/// 采样中出现频率最高的两个字节值及其合计占比（0.0 ~ 1.0）。
+///
+/// 用于「重复填充」检测：未写满的介质、00/FF 交替填充等模式的采样几乎只由
+/// 两种字节值构成，top-2 占比接近 100%；正常内容（文本 top-2 约 15~30%、
+/// 压缩/编码数据 top-2 约 1%）远达不到高占比。与总熵不同，该指标是比例，
+/// 不受文件大小影响，因此对小文件也稳定。
+pub fn top_two_ratio(sample: &[u8]) -> (u8, u8, f64) {
+    let mut counts = [0usize; 256];
+    for &b in sample {
+        counts[b as usize] += 1;
+    }
+    let (mut first, mut second) = (0usize, 1usize);
+    if counts[first] < counts[second] {
+        std::mem::swap(&mut first, &mut second);
+    }
+    for i in 2..256 {
+        if counts[i] > counts[first] {
+            second = first;
+            first = i;
+        } else if counts[i] > counts[second] {
+            second = i;
+        }
+    }
+    let ratio = if sample.is_empty() {
+        0.0
+    } else {
+        (counts[first] + counts[second]) as f64 / sample.len() as f64
+    };
+    (first as u8, second as u8, ratio)
+}

@@ -4,6 +4,10 @@ use crate::core::dispatch::expected_by_ext;
 use crate::core::entropy;
 use crate::core::{FileHint, Finding, Mode, Opts, Report};
 
+/// 重复填充判定阈值：采样中 top-2 字节值合计占比达到该值即报 REPEATED_FILL。
+/// 正常内容到不了这个量级（文本约 15~30%，压缩/编码数据约 1%），故误报极低。
+const REPEATED_FILL_RATIO: f64 = 0.90;
+
 /// 无魔数的文本类扩展名
 pub fn text_ext(ext: &str) -> bool {
     matches!(
@@ -112,10 +116,12 @@ pub fn verify(path: &Path, hint: &FileHint, opts: &Opts) -> Report {
                 ));
             } else if hint.size >= 8192 {
                 // 小文件的采样字节太少，熵估计噪声大、天然偏低，容易误判为
-                // 「重复填充」，故只对 ≥8 KiB 的文件做低熵提示（仍为 Ok 级说明，
-                // 不影响结论；全零填充由上面的 ALL_ZERO 单独提示）。
+                // 「重复填充」，故只对 ≥8 KiB 的文件做判定（全零填充由上面的
+                // ALL_ZERO 单独提示，不受此阈值限制）。
                 let e = entropy::shannon_entropy(&sample);
                 if e < opts.entropy_threshold {
+                    // 低熵只是提示：小文件、内容简单的文件天然低熵，保持 Ok 级
+                    // 说明，不影响结论（真正可疑的填充走下面的 REPEATED_FILL）。
                     report.push(Finding::ok(
                         "LOW_ENTROPY",
                         format!(
@@ -123,6 +129,22 @@ pub fn verify(path: &Path, hint: &FileHint, opts: &Opts) -> Report {
                             opts.entropy_threshold
                         ),
                     ));
+                }
+                // 重复填充：仅对无魔数的原始数据判定。有魔数的文件已由格式
+                // 验证器做结构校验，且合法的双色图像（如 1-bit BMP）也呈双字节
+                // 分布，会误报；无魔数时这种模式几乎必然是未写满/重复填充。
+                if hint.magic.is_none() {
+                    let (b1, b2, ratio) = entropy::top_two_ratio(&sample);
+                    if ratio >= REPEATED_FILL_RATIO {
+                        report.push(Finding::warning(
+                            "REPEATED_FILL",
+                            format!(
+                                "采样中 0x{b1:02X}/0x{b2:02X} 两种字节合计占 {:.1}%（疑似重复填充或未写满）",
+                                ratio * 100.0,
+                            ),
+                            None,
+                        ));
+                    }
                 }
             }
         }
