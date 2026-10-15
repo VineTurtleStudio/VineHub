@@ -110,16 +110,18 @@ pub fn verify(path: &Path, hint: &FileHint, opts: &Opts) -> Report {
                     "采样内容全为零字节（疑似填充或未写入）",
                     Some(0),
                 ));
-            } else if hint.size >= 4096 {
+            } else if hint.size >= 8192 {
+                // 小文件的采样字节太少，熵估计噪声大、天然偏低，容易误判为
+                // 「重复填充」，故只对 ≥8 KiB 的文件做低熵提示（仍为 Ok 级说明，
+                // 不影响结论；全零填充由上面的 ALL_ZERO 单独提示）。
                 let e = entropy::shannon_entropy(&sample);
                 if e < opts.entropy_threshold {
-                    report.push(Finding::warning(
+                    report.push(Finding::ok(
                         "LOW_ENTROPY",
                         format!(
-                            "采样熵 {e:.2} 低于阈值 {:.2}（可能为重复填充）",
+                            "采样熵 {e:.2} 低于阈值 {:.2}（文件较小或内容重复度高，仅供参考）",
                             opts.entropy_threshold
                         ),
-                        None,
                     ));
                 }
             }

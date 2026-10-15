@@ -1669,22 +1669,23 @@ fn verify_flac(path: &Path, size: u64, opts: &Opts, report: &mut Report) {
 /// "帧能被正确切分"，MD5 才能证明"解码出的音频一个样本都没变"。
 fn verify_flac_md5(path: &Path, size: u64, opts: &Opts, stored: Option<[u8; 16]>, report: &mut Report) {
     let Some(stored) = stored else {
-        report.push(Finding::warning(
+        // 未记录 MD5 是编码器/年代问题，不是文件损坏；结构校验已通过，故为 Ok 级提示。
+        report.push(Finding::ok(
             "FLAC_NO_MD5",
-            "STREAMINFO 未记录音频 MD5（多为老 rip），无法做完整校验",
-            None,
+            "STREAMINFO 未记录音频 MD5（多为老 rip），无法做完整校验（结构校验已通过）",
         ));
         return;
     };
 
+    // 超过深度解码阈值只是「没做完整 MD5 校验」，不是文件有问题。结构层已通过，
+    // 故降为 Ok 级说明性提示：详情面板/报告仍可见，但不再把结论拖成可疑/未知。
     if !opts.should_deep(size) {
-        report.push(Finding::unknown(
+        report.push(Finding::ok(
             "FLAC_MD5_TOO_LARGE",
             format!(
-                "文件 {size} 字节超过深度解码阈值 {}，MD5 校验跳过（可在设置里调大阈值或强制深度解码）",
+                "文件 {size} 字节超过深度解码阈值 {}，未做完整 MD5 校验（结构校验已通过；可在设置里调大阈值或强制深度解码）",
                 opts.max_deep_size
             ),
-            None,
         ));
         return;
     }
@@ -1692,12 +1693,11 @@ fn verify_flac_md5(path: &Path, size: u64, opts: &Opts, stored: Option<[u8; 16]>
     let computed = match decode_flac_md5(path) {
         Ok(computed) => computed,
         Err(FlacDecodeError::TooLarge) => {
-            report.push(Finding::unknown(
+            report.push(Finding::ok(
                 "FLAC_MD5_TOO_LARGE",
                 format!(
-                    "文件 {size} 字节超过硬上限 {FLAC_MD5_HARD_LIMIT}，MD5 校验跳过",
+                    "文件 {size} 字节超过硬上限 {FLAC_MD5_HARD_LIMIT}，未做完整 MD5 校验（结构校验已通过）",
                 ),
-                None,
             ));
             return;
         }
@@ -1710,10 +1710,9 @@ fn verify_flac_md5(path: &Path, size: u64, opts: &Opts, stored: Option<[u8; 16]>
             return;
         }
         Err(FlacDecodeError::Unavailable) => {
-            report.push(Finding::unknown(
+            report.push(Finding::ok(
                 "FLAC_MD5_SKIPPED",
-                "FLAC 深度解码未执行（解码器不可用），MD5 校验跳过",
-                None,
+                "FLAC 深度解码未执行（解码器不可用），未做完整 MD5 校验（结构校验已通过）",
             ));
             return;
         }
