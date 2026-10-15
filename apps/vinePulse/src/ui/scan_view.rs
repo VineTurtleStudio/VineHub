@@ -498,6 +498,9 @@ impl ScanState {
         egui::containers::Panel::left("targets")
             .resizable(true)
             .default_size(230.0)
+            // 长路径不再把面板顶宽、把右侧结果表挤出窗口（需全屏才恢复）；
+            // 仅封顶自动增长，仍可手动拖动到 400（超出部分 hover 显示完整路径）。
+            .max_size(400.0)
             .show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.heading("扫描目标");
@@ -519,7 +522,13 @@ impl ScanState {
                         for (i, p) in self.targets.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 let name = display_path(p);
-                                ui.add(
+                                // 长名截断时给尾部 ✕ 预留空间：否则整行超出面板宽度，
+                                // 既把 ✕ 挤出可视/可点区，又把面板顶宽、把结果表挤出窗口。
+                                let button_w = ui.spacing().interact_size.x
+                                    + ui.spacing().item_spacing.x;
+                                let label_w = (ui.available_width() - button_w).max(40.0);
+                                ui.add_sized(
+                                    [label_w, ui.spacing().interact_size.y],
                                     egui::Label::new(&name)
                                         .truncate()
                                         .sense(egui::Sense::click()),
