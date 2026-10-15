@@ -47,8 +47,15 @@ impl Verifier for SqliteVerifier {
             return report;
         }
 
-        // 完整性快速检查放到深度档
-        if !opts.should_deep(size) {
+        // 完整性 quick_check 是 SQLite 的核心校验：≤ FULL_CHECK_LIMIT 一律执行
+        if !opts.core_deep(size) {
+            report.push(Finding::ok(
+                "SQLITE_CHECK_SKIPPED",
+                format!(
+                    "文件 {size} 字节超过 {} MiB，PRAGMA quick_check 未执行（勾选「强制深度解码」可执行）",
+                    crate::core::FULL_CHECK_LIMIT / (1024 * 1024)
+                ),
+            ));
             return report;
         }
         let conn = match rusqlite::Connection::open_with_flags(

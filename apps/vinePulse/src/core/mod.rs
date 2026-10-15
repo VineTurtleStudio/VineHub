@@ -1,6 +1,7 @@
 pub mod dispatch;
 pub mod entropy;
 pub mod hash;
+pub mod stream;
 pub mod walker;
 
 use std::fmt;
@@ -210,7 +211,17 @@ impl Opts {
     pub fn should_deep(&self, size: u64) -> bool {
         self.deep || size <= self.max_deep_size
     }
+
+    /// 核心完整性校验是否执行（对照 [`FULL_CHECK_LIMIT`]）
+    pub fn core_deep(&self, size: u64) -> bool {
+        size <= FULL_CHECK_LIMIT || self.should_deep(size)
+    }
 }
+
+/// 核心完整性校验（逐条解压 CRC、gzip 尾部 CRC、SQLite quick_check、FLAC 全量 MD5 等）
+/// 的默认大小上限：**以内一律执行**，不受 `max_deep_size` 限制；超过时默认记 Ok 级说明，
+/// 勾选「强制深度解码」(-d) 或调高 `max_deep_size` 后照常执行（一律流式、内存恒定）。
+pub const FULL_CHECK_LIMIT: u64 = 512 * 1024 * 1024;
 
 /// 分发器读取的文件摘要
 #[derive(Debug, Clone)]

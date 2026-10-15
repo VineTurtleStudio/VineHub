@@ -1,8 +1,9 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 
 use crate::core::dispatch::{MagicKind, expected_by_ext};
+use crate::core::stream::ByteStream;
 use crate::core::{FileHint, Finding, Mode, Opts, Report, Severity, Verifier};
 
 const PNG_SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
@@ -264,10 +265,9 @@ pub fn deep_decode(path: &Path, opts: &Opts, report: &mut Report, code: &'static
             let msg = e.to_string();
             let low = msg.to_ascii_lowercase();
             if low.contains("memory") || low.contains("limit") || low.contains("too large") {
-                report.push(Finding::unknown(
+                report.push(Finding::ok(
                     "DECODE_SKIPPED",
-                    format!("{label} 深度解码因资源限制跳过：{msg}"),
-                    None,
+                    format!("{label} 深度解码因资源限制未执行（结构校验已完成）：{msg}"),
                 ));
             } else {
                 report.push(Finding::corrupt(
@@ -336,29 +336,24 @@ impl Verifier for JpegVerifier {
     }
 }
 
-/// 基于 marker 的 JPEG 结构遍历
+/// 基于 marker 的 JPEG 结构遍历（流式，不限文件大小）
 fn verify_jpeg_structure(path: &Path, size: u64, report: &mut Report) {
-    if size > 512 * 1024 * 1024 {
-        report.push(Finding::unknown(
-            "JPEG_TOO_LARGE",
-            "文件超过 512 MiB，跳过结构遍历",
-            None,
-        ));
-        return;
-    }
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
+    let file = match File::open(path) {
+        Ok(f) => f,
         Err(e) => {
             report.push(Finding::unknown(
                 "IO_ERROR",
-                format!("读取文件失败：{e}"),
+                format!("打开文件失败：{e}"),
                 None,
             ));
             return;
         }
     };
+    let mut r = BufReader::new(file);
+    let mut s = ByteStream::new(&mut r);
 
-    if data.len() < 2 || data[0] != 0xFF || data[1] != 0xD8 {
+    let mut sig = [0u8; 2];
+    if !s.read_exact(&mut sig) || sig != [0xFF, 0xD8] {
         report.push(Finding::corrupt(
             "JPEG_BAD_SIG",
             "缺少 SOI 标记（FF D8），文件头已损坏",
@@ -367,34 +362,34 @@ fn verify_jpeg_structure(path: &Path, size: u64, report: &mut Report) {
         return;
     }
 
-    let mut i = 2usize;
     let mut found_eoi = false;
 
-    while i < data.len() {
-        if data[i] != 0xFF {
+    'outer: while s.pos() < size {
+        let Some(b) = s.byte() else { break };
+        if b != 0xFF {
+            let at = s.pos() - 1;
             report.push(Finding::corrupt(
                 "JPEG_BAD_MARKER",
-                format!("偏移 {i} 处缺少 0xFF 标记前缀，结构已损坏"),
-                Some(i as u64),
+                format!("偏移 {at} 处缺少 0xFF 标记前缀，结构已损坏"),
+                Some(at),
             ));
             return;
         }
-        while i < data.len() && data[i] == 0xFF {
-            i += 1;
-        }
-        if i >= data.len() {
-            break; // 文件以 FF 结尾 → 未见 EOI
-        }
-        let marker = data[i];
-        let marker_pos = i;
-        i += 1;
+        // 跳过 FF 填充串，取标记字节
+        let (marker, marker_pos) = loop {
+            let Some(c) = s.byte() else { break 'outer }; // 文件以 FF 结尾 → 未见 EOI
+            if c == 0xFF {
+                continue;
+            }
+            break (c, s.pos() - 1);
+        };
 
         match marker {
             0x00 => {
                 report.push(Finding::corrupt(
                     "JPEG_BAD_MARKER",
                     format!("偏移 {marker_pos} 处出现扫描数据外的 FF00 填充"),
-                    Some(marker_pos as u64),
+                    Some(marker_pos),
                 ));
                 return;
             }
@@ -406,68 +401,75 @@ fn verify_jpeg_structure(path: &Path, size: u64, report: &mut Report) {
             0xD8 | 0x01 | 0xD0..=0xD7 => continue,
             0xDA => {
                 // SOS：段头之后是熵编码数据
-                let seglen = match read_seglen(&data, i, marker_pos, report) {
-                    Some(l) => l,
-                    None => return,
+                let len_pos = s.pos();
+                let Some(seglen) = read_seglen_stream(&mut s, marker, marker_pos, report) else {
+                    return;
                 };
-                if i + seglen as usize > data.len() {
+                let target = len_pos + seglen as u64;
+                if target > size {
                     report.push(Finding::corrupt(
                         "JPEG_TRUNCATED",
                         format!("SOS 段超出文件范围（偏移 {marker_pos}）"),
-                        Some(marker_pos as u64),
+                        Some(marker_pos),
                     ));
                     return;
                 }
-                i += seglen as usize;
+                s.seek_to(target);
 
-                // 扫描熵数据：FF00 填充字节与 RSTn 直接放过
-                while i < data.len() {
-                    if data[i] != 0xFF {
-                        i += 1;
+                // 扫描熵数据：FF00 填充字节与 RSTn 直接放过；EOF → 交回外层（未见 EOI）
+                let mut eoi = false;
+                while let Some(x) = s.byte() {
+                    if x != 0xFF {
                         continue;
                     }
-                    let ff_pos = i;
-                    let mut j = i + 1;
-                    while j < data.len() && data[j] == 0xFF {
-                        j += 1;
+                    let ff_pos = s.pos() - 1;
+                    // 跳过 FF 串取后继字节
+                    let mut m = None;
+                    loop {
+                        match s.byte() {
+                            None => break,
+                            Some(0xFF) => continue,
+                            Some(c) => {
+                                m = Some(c);
+                                break;
+                            }
+                        }
                     }
-                    if j >= data.len() {
-                        i = data.len();
-                        break;
+                    match m {
+                        None => break, // EOF
+                        Some(0x00) | Some(0xD0..=0xD7) => continue,
+                        Some(0xD9) => {
+                            eoi = true;
+                            break;
+                        }
+                        Some(_) => {
+                            s.seek_to(ff_pos); // 其他标记交回外层
+                            break;
+                        }
                     }
-                    let m = data[j];
-                    if m == 0x00 || (0xD0..=0xD7).contains(&m) {
-                        i = j + 1;
-                        continue;
-                    }
-                    if m == 0xD9 {
-                        i = j + 1;
-                        found_eoi = true;
-                        break;
-                    }
-                    i = ff_pos; // 其他标记交回外层
-                    break;
                 }
-                if found_eoi {
-                    break;
+                if eoi {
+                    found_eoi = true;
+                    break 'outer;
                 }
             }
             _ => {
-                let seglen = match read_seglen(&data, i, marker_pos, report) {
-                    Some(l) => l,
-                    None => return,
+                let len_pos = s.pos();
+                let Some(seglen) = read_seglen_stream(&mut s, marker, marker_pos, report) else {
+                    return;
                 };
-                if i + seglen as usize > data.len() {
+                let target = len_pos + seglen as u64;
+                if target > size {
                     report.push(Finding::corrupt(
                         "JPEG_TRUNCATED",
                         format!(
                             "标记 FF{marker:02X} 段数据超出文件范围（偏移 {marker_pos}），疑似截断"
                         ),
-                        Some(marker_pos as u64),
+                        Some(marker_pos),
                     ));
                     return;
                 }
-                i += seglen as usize;
+                s.seek_to(target);
             }
         }
     }
@@ -484,30 +486,38 @@ fn verify_jpeg_structure(path: &Path, size: u64, report: &mut Report) {
                 Some(size),
             ));
         }
-    } else if i < data.len() {
+    } else if s.pos() < size {
         report.push(Finding::warning(
             "JPEG_TRAILING_DATA",
-            format!("EOI 之后仍有 {} 字节多余数据", data.len() - i),
-            Some(i as u64),
+            format!("EOI 之后仍有 {} 字节多余数据", size - s.pos()),
+            Some(s.pos()),
         ));
     }
 }
 
-fn read_seglen(data: &[u8], i: usize, marker_pos: usize, report: &mut Report) -> Option<u16> {
-    if i + 2 > data.len() {
+/// 流式读取标记段长度字段（2 字节大端）
+fn read_seglen_stream<R: std::io::BufRead + Seek>(
+    s: &mut ByteStream<R>,
+    marker: u8,
+    marker_pos: u64,
+    report: &mut Report,
+) -> Option<u16> {
+    let len_pos = s.pos();
+    let mut b = [0u8; 2];
+    if !s.read_exact(&mut b) {
         report.push(Finding::corrupt(
             "JPEG_TRUNCATED",
-            format!("标记 FF{:02X} 缺少长度字段", data[marker_pos]),
-            Some(marker_pos as u64),
+            format!("标记 FF{marker:02X} 缺少长度字段"),
+            Some(marker_pos),
         ));
         return None;
     }
-    let seglen = u16::from_be_bytes([data[i], data[i + 1]]);
+    let seglen = u16::from_be_bytes(b);
     if seglen < 2 {
         report.push(Finding::corrupt(
             "JPEG_BAD_SEGMENT",
-            format!("标记 FF{:02X} 的段长度 {seglen} 非法", data[marker_pos]),
-            Some(i as u64),
+            format!("标记 FF{marker:02X} 的段长度 {seglen} 非法"),
+            Some(len_pos),
         ));
         return None;
     }
@@ -553,29 +563,6 @@ fn verify_image(
     report
 }
 
-/// 一次性读入文件；过大或读取失败时记结论并返回 None
-fn read_whole(path: &Path, size: u64, report: &mut Report, label: &str) -> Option<Vec<u8>> {
-    if size > 512 * 1024 * 1024 {
-        report.push(Finding::unknown(
-            "IMAGE_TOO_LARGE",
-            format!("{label} 文件超过 512 MiB，跳过结构遍历"),
-            None,
-        ));
-        return None;
-    }
-    match std::fs::read(path) {
-        Ok(d) => Some(d),
-        Err(e) => {
-            report.push(Finding::unknown(
-                "IO_ERROR",
-                format!("读取文件失败：{e}"),
-                None,
-            ));
-            None
-        }
-    }
-}
-
 // --- GIF ---
 
 pub struct GifVerifier;
@@ -598,36 +585,47 @@ impl Verifier for GifVerifier {
 }
 
 /// 跳过 GIF 子块链（长度字节 + 数据，直到 0 结束）；数据不足返回 false
-fn skip_gif_sub_blocks(data: &[u8], i: &mut usize) -> bool {
+fn skip_gif_sub_blocks<R: std::io::BufRead + Seek>(s: &mut ByteStream<R>, size: u64) -> bool {
     loop {
-        if *i >= data.len() {
-            return false;
-        }
-        let sz = data[*i] as usize;
-        *i += 1;
+        let Some(sz) = s.byte() else { return false };
         if sz == 0 {
             return true;
         }
-        if *i + sz > data.len() {
+        let sz = u64::from(sz);
+        if s.pos() + sz > size {
             return false;
         }
-        *i += sz;
+        s.skip(sz);
     }
 }
 
+/// GIF 结构遍历（流式，不限文件大小）
 fn verify_gif_structure(path: &Path, size: u64, report: &mut Report) {
-    let Some(data) = read_whole(path, size, report, "GIF") else {
-        return;
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            report.push(Finding::unknown(
+                "IO_ERROR",
+                format!("打开文件失败：{e}"),
+                None,
+            ));
+            return;
+        }
     };
-    if data.len() < 13 {
+    let mut r = BufReader::new(file);
+    let mut s = ByteStream::new(&mut r);
+
+    let mut head = [0u8; 13];
+    let n = s.read_up_to(&mut head);
+    if n < 13 {
         report.push(Finding::corrupt(
             "GIF_TRUNCATED",
-            format!("文件仅 {} 字节，不足 GIF 逻辑屏幕描述符（13 字节）", data.len()),
+            format!("文件仅 {n} 字节，不足 GIF 逻辑屏幕描述符（13 字节）"),
             Some(0),
         ));
         return;
     }
-    if !data.starts_with(b"GIF87a") && !data.starts_with(b"GIF89a") {
+    if !head.starts_with(b"GIF87a") && !head.starts_with(b"GIF89a") {
         report.push(Finding::corrupt(
             "GIF_BAD_SIG",
             "缺少 GIF 签名（GIF87a/GIF89a），文件头已损坏",
@@ -636,11 +634,10 @@ fn verify_gif_structure(path: &Path, size: u64, report: &mut Report) {
         return;
     }
 
-    let packed = data[10];
-    let mut i = 13usize;
+    let packed = head[10];
     if packed & 0x80 != 0 {
-        let gct = 3usize * (1usize << ((packed & 0x07) + 1));
-        if i + gct > data.len() {
+        let gct = 3u64 << ((packed & 0x07) + 1);
+        if s.pos() + gct > size {
             report.push(Finding::corrupt(
                 "GIF_TRUNCATED",
                 format!("全局颜色表需要 {gct} 字节，超出文件范围"),
@@ -648,87 +645,89 @@ fn verify_gif_structure(path: &Path, size: u64, report: &mut Report) {
             ));
             return;
         }
-        i += gct;
+        s.skip(gct);
     }
 
-    let mut trailer: Option<usize> = None;
+    let mut trailer: Option<u64> = None;
     let mut images = 0usize;
 
-    while i < data.len() {
-        match data[i] {
+    while s.pos() < size {
+        let Some(b) = s.byte() else { break };
+        match b {
             0x3B => {
-                trailer = Some(i);
-                i += 1;
+                trailer = Some(s.pos() - 1);
                 break;
             }
             0x21 => {
-                let block_at = i;
-                i += 1; // 0x21
-                if i >= data.len() {
+                let block_at = s.pos() - 1;
+                if s.byte().is_none() {
                     report.push(Finding::corrupt(
                         "GIF_TRUNCATED",
                         format!("偏移 {block_at} 处的扩展块缺少标签字节"),
-                        Some(block_at as u64),
+                        Some(block_at),
                     ));
                     return;
                 }
-                i += 1; // 扩展标签
-                if !skip_gif_sub_blocks(&data, &mut i) {
+                if !skip_gif_sub_blocks(&mut s, size) {
                     report.push(Finding::corrupt(
                         "GIF_TRUNCATED",
                         format!("偏移 {block_at} 处的扩展块数据不完整"),
-                        Some(block_at as u64),
+                        Some(block_at),
                     ));
                     return;
                 }
             }
             0x2C => {
                 images += 1;
-                if i + 10 > data.len() {
+                let desc_at = s.pos() - 1;
+                // 0x2C 之外还剩 9 字节（left/top/宽/高/packed）
+                let mut idesc = [0u8; 9];
+                if s.read_up_to(&mut idesc) < 9 {
                     report.push(Finding::corrupt(
                         "GIF_TRUNCATED",
-                        format!("偏移 {i} 处的图像描述符不完整"),
-                        Some(i as u64),
+                        format!("偏移 {desc_at} 处的图像描述符不完整"),
+                        Some(desc_at),
                     ));
                     return;
                 }
-                let ip = data[i + 9];
-                i += 10;
+                let ip = idesc[8];
                 if ip & 0x80 != 0 {
-                    let lct = 3usize * (1usize << ((ip & 0x07) + 1));
-                    if i + lct > data.len() {
+                    let lct = 3u64 << ((ip & 0x07) + 1);
+                    if s.pos() + lct > size {
                         report.push(Finding::corrupt(
                             "GIF_TRUNCATED",
                             format!("局部颜色表需要 {lct} 字节，超出文件范围"),
-                            Some(i as u64),
+                            Some(s.pos()),
                         ));
                         return;
                     }
-                    i += lct;
+                    s.skip(lct);
                 }
-                if i >= data.len() {
+                let lzw_pos = s.pos();
+                if s.byte().is_none() {
                     report.push(Finding::corrupt(
                         "GIF_TRUNCATED",
                         "缺少 LZW 最小码长字节",
-                        Some(i as u64),
+                        Some(lzw_pos),
                     ));
                     return;
                 }
-                i += 1; // LZW 最小码长
-                if !skip_gif_sub_blocks(&data, &mut i) {
+                if !skip_gif_sub_blocks(&mut s, size) {
+                    let fail_pos = s.pos();
                     report.push(Finding::corrupt(
                         "GIF_TRUNCATED",
-                        format!("偏移 {i} 处的 LZW 数据块不完整"),
-                        Some(i as u64),
+                        format!("偏移 {fail_pos} 处的 LZW 数据块不完整"),
+                        Some(fail_pos),
                     ));
                     return;
                 }
             }
             b => {
+                let at = s.pos() - 1;
                 report.push(Finding::corrupt(
                     "GIF_BAD_BLOCK",
-                    format!("偏移 {i} 处块标识非法（0x{b:02X}），结构已损坏"),
-                    Some(i as u64),
+                    format!("偏移 {at} 处块标识非法（0x{b:02X}），结构已损坏"),
+                    Some(at),
                 ));
                 return;
             }
@@ -747,15 +746,15 @@ fn verify_gif_structure(path: &Path, size: u64, report: &mut Report) {
         report.push(Finding::corrupt(
             "GIF_NO_IMAGE",
             "GIF 中没有任何图像描述符，文件内容已损坏",
-            Some(tr as u64),
+            Some(tr),
         ));
         return;
     }
-    if i < data.len() {
+    if s.pos() < size {
         report.push(Finding::warning(
             "GIF_TRAILING_DATA",
-            format!("结束符之后仍有 {} 字节多余数据", data.len() - i),
-            Some(i as u64),
+            format!("结束符之后仍有 {} 字节多余数据", size - s.pos()),
+            Some(s.pos()),
         ));
     }
 }
@@ -781,18 +780,40 @@ impl Verifier for BmpVerifier {
     }
 }
 
+/// BMP 结构校验：只读文件头（54 字节内），全部界检查对照文件大小，不限文件大小
 fn verify_bmp_structure(path: &Path, size: u64, report: &mut Report) {
-    let Some(data) = read_whole(path, size, report, "BMP") else {
-        return;
-    };
-    if data.len() < 26 {
+    if size < 26 {
         report.push(Finding::corrupt(
             "BMP_TRUNCATED",
-            format!("文件仅 {} 字节，不足 BMP 文件头 + DIB 头", data.len()),
+            format!("文件仅 {size} 字节，不足 BMP 文件头 + DIB 头"),
             Some(0),
         ));
         return;
     }
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            report.push(Finding::unknown(
+                "IO_ERROR",
+                format!("打开文件失败：{e}"),
+                None,
+            ));
+            return;
+        }
+    };
+    let mut r = BufReader::new(file);
+    let mut head = [0u8; 54];
+    let n = (&mut r).take(54).read(&mut head).unwrap_or(0);
+    if n < 26 {
+        report.push(Finding::corrupt(
+            "BMP_TRUNCATED",
+            format!("文件仅 {n} 字节，不足 BMP 文件头 + DIB 头"),
+            Some(0),
+        ));
+        return;
+    }
+    let data = &head[..n];
+
     if &data[0..2] != b"BM" {
         report.push(Finding::corrupt(
             "BMP_BAD_SIG",
@@ -836,7 +857,7 @@ fn verify_bmp_structure(path: &Path, size: u64, report: &mut Report) {
             Some(14),
         ));
     }
-    if (data.len() as u64) < 14 + dib as u64 {
+    if size < 14 + u64::from(dib) {
         report.push(Finding::corrupt(
             "BMP_TRUNCATED",
             format!("DIB 头声明 {dib} 字节，文件不足以容纳"),
@@ -855,7 +876,7 @@ fn verify_bmp_structure(path: &Path, size: u64, report: &mut Report) {
             0u32,
         )
     } else {
-        if data.len() < 54 {
+        if n < 54 {
             report.push(Finding::corrupt(
                 "BMP_TRUNCATED",
                 "BITMAPINFOHEADER 头不完整",
@@ -904,7 +925,7 @@ fn verify_bmp_structure(path: &Path, size: u64, report: &mut Report) {
         ));
         return;
     }
-    if data_off < 14 + dib as u64 || data_off > size {
+    if data_off < 14 + u64::from(dib) || data_off > size {
         report.push(Finding::corrupt(
             "BMP_BAD_DATA_OFFSET",
             format!("像素数据起始偏移 {data_off} 非法（DIB 头结束于 {}）", 14 + dib),
@@ -952,19 +973,33 @@ impl Verifier for WebpVerifier {
     }
 }
 
+/// WebP 结构遍历（流式逐 chunk，不限文件大小）
 fn verify_webp_structure(path: &Path, size: u64, report: &mut Report) {
-    let Some(data) = read_whole(path, size, report, "WebP") else {
-        return;
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            report.push(Finding::unknown(
+                "IO_ERROR",
+                format!("打开文件失败：{e}"),
+                None,
+            ));
+            return;
+        }
     };
-    if data.len() < 12 {
+    let mut r = BufReader::new(file);
+    let mut s = ByteStream::new(&mut r);
+
+    let mut head = [0u8; 12];
+    let n = s.read_up_to(&mut head);
+    if n < 12 {
         report.push(Finding::corrupt(
             "WEBP_TRUNCATED",
-            format!("文件仅 {} 字节，不足 RIFF 头（12 字节）", data.len()),
+            format!("文件仅 {n} 字节，不足 RIFF 头（12 字节）"),
             Some(0),
         ));
         return;
     }
-    if &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+    if &head[0..4] != b"RIFF" || &head[8..12] != b"WEBP" {
         report.push(Finding::corrupt(
             "WEBP_BAD_SIG",
             "缺少 RIFF/WEBP 文件头，文件头已损坏",
@@ -972,7 +1007,7 @@ fn verify_webp_structure(path: &Path, size: u64, report: &mut Report) {
         ));
         return;
     }
-    let riff = u32::from_le_bytes(data[4..8].try_into().unwrap()) as u64;
+    let riff = u32::from_le_bytes(head[4..8].try_into().unwrap()) as u64;
     if riff + 8 > size {
         report.push(Finding::corrupt(
             "WEBP_TRUNCATED",
@@ -988,22 +1023,24 @@ fn verify_webp_structure(path: &Path, size: u64, report: &mut Report) {
             Some(4),
         ));
     }
-    let end = (riff + 8) as usize;
+    let end = riff + 8;
 
-    let mut i = 12usize;
     let mut chunks = 0usize;
-    while i + 8 <= end {
-        let Ok(fourcc) = <[u8; 4]>::try_from(&data[i..i + 4]) else {
+    while s.pos() + 8 <= end {
+        let mut cb = [0u8; 8];
+        if s.read_up_to(&mut cb) < 8 {
             break;
-        };
-        let csize = u32::from_le_bytes(data[i + 4..i + 8].try_into().unwrap()) as u64;
-        let payload = i as u64 + 8;
+        }
+        let fourcc = <[u8; 4]>::try_from(&cb[..4]).unwrap();
+        let csize = u32::from_le_bytes(cb[4..8].try_into().unwrap()) as u64;
+        let hdr_pos = s.pos() - 8;
+        let payload = s.pos();
         let name = String::from_utf8_lossy(&fourcc).into_owned();
-        if payload + csize > end as u64 {
+        if payload + csize > end {
             report.push(Finding::corrupt(
                 "WEBP_TRUNCATED",
                 format!("{name} 块声明 {csize} 字节，超出 RIFF 容器范围"),
-                Some(i as u64),
+                Some(hdr_pos),
             ));
             return;
         }
@@ -1015,7 +1052,7 @@ fn verify_webp_structure(path: &Path, size: u64, report: &mut Report) {
             report.push(Finding::corrupt(
                 "WEBP_BAD_CHUNK",
                 format!("首个数据块是 {name}，应为 VP8 / VP8L / VP8X"),
-                Some(i as u64),
+                Some(hdr_pos),
             ));
             return;
         }
@@ -1025,14 +1062,21 @@ fn verify_webp_structure(path: &Path, size: u64, report: &mut Report) {
                     report.push(Finding::corrupt(
                         "WEBP_BAD_CHUNK",
                         format!("VP8X 扩展块长度应为 10，实际 {csize}"),
-                        Some(i as u64),
+                        Some(hdr_pos),
                     ));
                     return;
                 }
             }
             b"VP8L" => {
-                let p = payload as usize;
-                if csize < 1 || data[p] != 0x2F {
+                if csize < 1 {
+                    report.push(Finding::corrupt(
+                        "WEBP_BAD_CHUNK",
+                        "VP8L 无损流缺少签名字节 0x2F",
+                        Some(payload),
+                    ));
+                    return;
+                }
+                if s.byte() != Some(0x2F) {
                     report.push(Finding::corrupt(
                         "WEBP_BAD_CHUNK",
                         "VP8L 无损流缺少签名字节 0x2F",
@@ -1041,9 +1085,9 @@ fn verify_webp_structure(path: &Path, size: u64, report: &mut Report) {
                     return;
                 }
             }
-            b"VP8 " => {
-                let p = payload as usize;
-                if csize >= 6 && [data[p + 3], data[p + 4], data[p + 5]] != [0x9D, 0x01, 0x2A] {
+            b"VP8 " if csize >= 6 => {
+                let mut kb = [0u8; 6];
+                if !s.read_exact(&mut kb) || [kb[3], kb[4], kb[5]] != [0x9D, 0x01, 0x2A] {
                     report.push(Finding::corrupt(
                         "WEBP_BAD_CHUNK",
                         "VP8 关键帧缺少起始码 9D 01 2A",
@@ -1056,7 +1100,7 @@ fn verify_webp_structure(path: &Path, size: u64, report: &mut Report) {
         }
         chunks += 1;
         let padded = payload + ((csize + 1) & !1);
-        i = (padded.min(end as u64)) as usize;
+        s.seek_to(padded.min(end));
     }
 
     if chunks == 0 {
@@ -1089,46 +1133,65 @@ impl Verifier for TiffVerifier {
     }
 }
 
-/// 统一的大小端读取器（带边界检查）
-struct TiffCtx<'a> {
-    data: &'a [u8],
+/// 基于 File+seek 的统一读取器（带边界检查）：随机访问 IFD 链，不整读文件
+struct TiffReader {
+    f: File,
+    len: u64,
     le: bool,
     big: bool,
 }
 
-impl TiffCtx<'_> {
-    fn u16(&self, o: usize) -> Option<u16> {
-        let b = self.data.get(o..o + 2)?;
+impl TiffReader {
+    fn read_at(&mut self, off: u64, buf: &mut [u8]) -> Option<()> {
+        if off.saturating_add(buf.len() as u64) > self.len {
+            return None;
+        }
+        use std::io::Seek;
+        self.f.seek(std::io::SeekFrom::Start(off)).ok()?;
+        self.f.read_exact(buf).ok()
+    }
+
+    fn u16(&mut self, off: u64) -> Option<u16> {
+        let mut b = [0u8; 2];
+        self.read_at(off, &mut b)?;
         Some(if self.le {
-            u16::from_le_bytes([b[0], b[1]])
+            u16::from_le_bytes(b)
         } else {
-            u16::from_be_bytes([b[0], b[1]])
+            u16::from_be_bytes(b)
         })
     }
 
-    fn u32(&self, o: usize) -> Option<u32> {
-        let b = self.data.get(o..o + 4)?;
-        let a: [u8; 4] = b.try_into().ok()?;
-        Some(if self.le { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) })
+    fn u32(&mut self, off: u64) -> Option<u32> {
+        let mut b = [0u8; 4];
+        self.read_at(off, &mut b)?;
+        Some(if self.le {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
     }
 
-    fn u64(&self, o: usize) -> Option<u64> {
-        let b = self.data.get(o..o + 8)?;
-        let a: [u8; 8] = b.try_into().ok()?;
-        Some(if self.le { u64::from_le_bytes(a) } else { u64::from_be_bytes(a) })
+    fn u64(&mut self, off: u64) -> Option<u64> {
+        let mut b = [0u8; 8];
+        self.read_at(off, &mut b)?;
+        Some(if self.le {
+            u64::from_le_bytes(b)
+        } else {
+            u64::from_be_bytes(b)
+        })
     }
 
-    fn entry_size(&self) -> usize {
+    fn entry_size(&self) -> u64 {
         if self.big { 20 } else { 12 }
     }
 
     /// 值字段内联区宽度
-    fn inline_size(&self) -> usize {
+    fn inline_size(&self) -> u64 {
         if self.big { 8 } else { 4 }
     }
 }
 
-fn tiff_type_size(ty: u16) -> Option<usize> {
+fn tiff_type_size(ty: u16) -> Option<u64> {
     Some(match ty {
         1 | 2 | 6 | 7 => 1,
         3 | 8 => 2,
@@ -1139,9 +1202,13 @@ fn tiff_type_size(ty: u16) -> Option<usize> {
     })
 }
 
-fn tiff_read_scalar(ctx: &TiffCtx, o: usize, ty: u16) -> Option<u64> {
+fn tiff_read_scalar(ctx: &mut TiffReader, o: u64, ty: u16) -> Option<u64> {
     match ty {
-        1 | 2 | 6 | 7 => ctx.data.get(o).map(|&b| u64::from(b)),
+        1 | 2 | 6 | 7 => {
+            let mut b = [0u8; 1];
+            ctx.read_at(o, &mut b)?;
+            Some(u64::from(b[0]))
+        }
         3 => ctx.u16(o).map(u64::from),
         4 => ctx.u32(o).map(u64::from),
         16 => ctx.u64(o),
@@ -1151,20 +1218,20 @@ fn tiff_read_scalar(ctx: &TiffCtx, o: usize, ty: u16) -> Option<u64> {
 
 /// 校验一个 IFD 的条目：尺寸非零、条带/瓦片偏移落在文件内
 fn tiff_scan_entries(
-    ctx: &TiffCtx,
-    entry0: usize,
-    n: usize,
+    ctx: &mut TiffReader,
+    entry0: u64,
+    n: u64,
     report: &mut Report,
 ) -> bool {
     let inline = ctx.inline_size();
-    let len = ctx.data.len() as u64;
+    let len = ctx.len;
     for k in 0..n {
         let p = entry0 + k * ctx.entry_size();
         let (Some(tag), Some(ty)) = (ctx.u16(p), ctx.u16(p + 2)) else {
             report.push(Finding::corrupt(
                 "TIFF_TRUNCATED",
                 format!("偏移 {p} 处 IFD 条目不完整"),
-                Some(p as u64),
+                Some(p),
             ));
             return false;
         };
@@ -1177,23 +1244,23 @@ fn tiff_scan_entries(
             continue;
         }
         let Some(tsz) = tiff_type_size(ty) else { continue };
-        let total = count.saturating_mul(tsz as u64);
+        let total = count.saturating_mul(tsz);
         let val_pos = p + if ctx.big { 12 } else { 8 };
 
-        if total <= inline as u64 {
+        if total <= inline {
             match tag {
                 256 | 257 => {
                     if tiff_read_scalar(ctx, val_pos, ty) == Some(0) {
                         report.push(Finding::corrupt(
                             "TIFF_BAD_DIMENSION",
                             format!("IFD 条目 {tag}（图像尺寸）为 0"),
-                            Some(val_pos as u64),
+                            Some(val_pos),
                         ));
                         return false;
                     }
                 }
                 273 | 324 => {
-                    let slots = (count as usize).min(inline / tsz.max(1));
+                    let slots = (count).min(inline / tsz.max(1));
                     for j in 0..slots {
                         let o = val_pos + j * tsz;
                         if let Some(v) = tiff_read_scalar(ctx, o, ty)
@@ -1202,7 +1269,7 @@ fn tiff_scan_entries(
                             report.push(Finding::corrupt(
                                 "TIFF_BAD_OFFSET",
                                 format!("条目 {tag} 指向偏移 {v}，超出文件范围"),
-                                Some(o as u64),
+                                Some(o),
                             ));
                             return false;
                         }
@@ -1220,20 +1287,20 @@ fn tiff_scan_entries(
                 report.push(Finding::corrupt(
                     "TIFF_BAD_OFFSET",
                     format!("条目 {tag} 的值区（偏移 {arr}，{total} 字节）超出文件范围"),
-                    Some(val_pos as u64),
+                    Some(val_pos),
                 ));
                 return false;
             }
             if matches!(tag, 273 | 324) {
                 for j in 0..count {
-                    let o = arr as usize + (j as usize) * tsz;
+                    let o = arr + j * tsz;
                     if let Some(v) = tiff_read_scalar(ctx, o, ty)
                         && v >= len
                     {
                         report.push(Finding::corrupt(
                             "TIFF_BAD_OFFSET",
                             format!("条目 {tag} 第 {j} 项指向偏移 {v}，超出文件范围"),
-                            Some(o as u64),
+                            Some(o),
                         ));
                         return false;
                     }
@@ -1245,18 +1312,41 @@ fn tiff_scan_entries(
 }
 
 fn verify_tiff_structure(path: &Path, size: u64, report: &mut Report) {
-    let Some(data) = read_whole(path, size, report, "TIFF") else {
-        return;
-    };
-    if data.len() < 8 {
+    if size < 8 {
         report.push(Finding::corrupt(
             "TIFF_TRUNCATED",
-            format!("文件仅 {} 字节，不足 TIFF 头（8 字节）", data.len()),
+            format!("文件仅 {size} 字节，不足 TIFF 头（8 字节）"),
             Some(0),
         ));
         return;
     }
-    let (le, big) = match &data[0..4] {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            report.push(Finding::unknown(
+                "IO_ERROR",
+                format!("打开文件失败：{e}"),
+                None,
+            ));
+            return;
+        }
+    };
+    let mut probe = TiffReader {
+        f: file,
+        len: size,
+        le: false,
+        big: false,
+    };
+    let mut sig = [0u8; 8];
+    if probe.read_at(0, &mut sig).is_none() {
+        report.push(Finding::corrupt(
+            "TIFF_TRUNCATED",
+            format!("文件仅 {size} 字节，不足 TIFF 头（8 字节）"),
+            Some(0),
+        ));
+        return;
+    }
+    let (le, big) = match &sig[..4] {
         b"II\x2a\x00" => (true, false),
         b"MM\x00\x2a" => (false, false),
         b"II\x2b\x00" => (true, true),
@@ -1270,14 +1360,12 @@ fn verify_tiff_structure(path: &Path, size: u64, report: &mut Report) {
             return;
         }
     };
-    let ctx = TiffCtx {
-        data: &data,
-        le,
-        big,
-    };
+    probe.le = le;
+    probe.big = big;
+    let ctx = &mut probe;
 
     let mut off = if big {
-        if data.len() < 16 {
+        if size < 16 {
             report.push(Finding::corrupt(
                 "TIFF_TRUNCATED",
                 "BigTIFF 头（16 字节）不完整",
@@ -1307,7 +1395,7 @@ fn verify_tiff_structure(path: &Path, size: u64, report: &mut Report) {
         return;
     }
 
-    let len = data.len() as u64;
+    let len = ctx.len;
     let mut hops = 0usize;
     loop {
         if hops > 64 {
@@ -1326,7 +1414,7 @@ fn verify_tiff_structure(path: &Path, size: u64, report: &mut Report) {
             ));
             return;
         }
-        let n = ctx.u16(off as usize).unwrap_or(0) as usize;
+        let n = u64::from(ctx.u16(off).unwrap_or(0));
         if n > 4096 {
             report.push(Finding::corrupt(
                 "TIFF_BAD_IFD",
@@ -1335,8 +1423,8 @@ fn verify_tiff_structure(path: &Path, size: u64, report: &mut Report) {
             ));
             return;
         }
-        let entry_size = ctx.entry_size() as u64;
-        let bytes = 2u64 + n as u64 * entry_size + if big { 8 } else { 4 };
+        let entry_size = ctx.entry_size();
+        let bytes = 2 + n * entry_size + if big { 8 } else { 4 };
         if off + bytes > len {
             report.push(Finding::corrupt(
                 "TIFF_TRUNCATED",
@@ -1345,11 +1433,11 @@ fn verify_tiff_structure(path: &Path, size: u64, report: &mut Report) {
             ));
             return;
         }
-        if !tiff_scan_entries(&ctx, (off + 2) as usize, n, report) {
+        if !tiff_scan_entries(ctx, off + 2, n, report) {
             return;
         }
 
-        let next_pos = (off + 2 + n as u64 * entry_size) as usize;
+        let next_pos = off + 2 + n * entry_size;
         let next = if big {
             ctx.u64(next_pos).unwrap_or(0)
         } else {

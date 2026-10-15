@@ -41,9 +41,9 @@ vine-pulse [选项] <文件或目录>...
                                文件为扫描目标并比对哈希；盲检模式下则会自动寻找
                                同名 sidecar（如 a.zip.sha256）比对
   -j, --json <输出文件>        导出 JSON 报告
-  -d, --deep                   强制深度解码（超过大小阈值的文件也解码）
+  -d, --deep                   强制深度/核心校验（超过大小阈值的检查也执行）
       --max-deep-size <MB>     深度解码大小阈值（默认 64；小于等于该值总是深度解码；
-                               FLAC MD5 校验不受此限，≤512 MiB 一律全量，-d 可忽略上限）
+                               核心完整性校验（归档 CRC、SQLite/FLAC 校验）≤512 MiB 一律执行）
   -q, --quiet                  仅输出有问题的文件
       --entropy-threshold <f>  低熵判定阈值（0~8，默认 0.5）
       --no-color               关闭彩色输出
@@ -70,6 +70,7 @@ vine-pulse [选项] <文件或目录>...
 - [x] **第二轮改进**（2026-10-15）：修复 ID3v2 前缀的 FLAC 误判为 MP3（`detect_magic` 跳过 ID3 标签识别真实签名，`FileHint::probe` 按需扩窗）+ 结果表「首因」徽章列（悬停看完整问题列表）+ 大批量扫描卡顿修复（`Report.size` 由目录遍历携带、去掉每文件 `metadata()` stat 与每帧 `to_vec()` 深拷贝）+ 状态栏速度 EWMA 平滑
 - [x] **第三轮：完美检测**（2026-10-15）：FLAC 金标准校验——完整解码整段音频并按 RFC 9639 §8.2 计算 PCM MD5，与 STREAMINFO 存储值比对（等价 `flac -t` / FlacValidator）；阈值与 CLI `--max-deep-size` 可调；熵采样从头/中/尾 3 点改为全文件均匀 32 点
 - [x] **第四轮：降噪与行业对齐**（2026-10-15）：「未执行的检查」与「损坏」分离（对齐 BATON/存档行业惯例）——`FLAC_NO_MD5`/`FLAC_MD5_SKIPPED`/`FLAC_TOO_LARGE`/`LOW_ENTROPY` 均降为 Ok 级说明（详情仍可见，不再拖成未知/可疑）；FLAC MD5 取消 64 MiB 软阈值，≤512 MiB 一律全量解码金标准校验，>512 MiB 默认跳过、勾选「强制深度解码」(-d) 时改走**流式全量 MD5**（只读头部取 STREAMINFO，GB 级整轨不占内存）；新增 `REPEATED_FILL` 重复填充检测（无魔数文件 top-2 字节值占比 ≥90% → 可疑，补上低熵降级后的空档）
+- [x] **第五轮：全格式真验证**（2026-10-15）：消灭一切「大小跳过」类 Unknown——JPEG/GIF/BMP/WebP/TIFF/MP3 结构遍历全部改流式（`core::stream::ByteStream` + BufReader，内存恒定、不限文件大小），`JPEG_TOO_LARGE`/`IMAGE_TOO_LARGE`/`MP3_TOO_LARGE` 移除；zip 逐条 CRC、gzip 解压 CRC、SQLite quick_check 升级为**核心完整性校验**（`FULL_CHECK_LIMIT` ≤512 MiB 一律执行，超限只记 Ok 级说明，-d/调高阈值可强制，全程流式），`SEVENZ_HEADER_TOO_LARGE` 移除（超大后续头改流式 CRC32），gzip 解压输出上限 512 MiB → 8 GiB、超限降为 Ok 说明；`DECODE_SKIPPED`（ffmpeg/image 资源限制）降为 Ok 级；新增 8 个 513 MiB 稀疏大文件回归测试，测试 127 → 135
 
 ## 技术栈
 
@@ -140,25 +141,26 @@ trait Verifier {
 
 - **分发**：先读魔数判断真实类型，扩展名仅作提示（可发现伪装/改名的文件）
 - **深度解码可开关**：按文件大小阈值或用户设置跳过，避免大文件卡顿
+- **核心完整性校验必做**：归档逐条 CRC、gzip 解压 CRC、SQLite quick_check、FLAC MD5 在 ≤512 MiB 时一律执行（不受深度解码开关影响）；结构遍历全流式，任意大文件都不跳过
 
 ## 各格式检测点
 
 | 类别 | 格式 | 检测方式 |
 |---|---|---|
 | 图片 | PNG | 逐块 CRC、IEND 存在性、尺寸一致性 |
-| 图片 | JPEG | marker 结构遍历 + 全图解码 |
-| 图片 | GIF/BMP/WebP | 结构解析 + 解码 |
+| 图片 | JPEG | marker 流式遍历（不限文件大小）+ 全图解码 |
+| 图片 | GIF/BMP/WebP | 流式结构遍历（不限文件大小）+ 解码 |
 | 音视频 | MP4/MOV | box 树遍历、长度越界、stco/stsc 索引越界；有 ffprobe 时深度解码 |
 | 音视频 | WAV/AVI | RIFF 块遍历、fmt/data 一致性 |
-| 音视频 | MP3/FLAC/OGG | 帧链遍历、FLAC CRC16 帧校验、OGG 页 CRC；FLAC ≤512 MiB 一律全解码 + STREAMINFO MD5 金标准比对，更大的走 `-d` 流式全解码；symphonia 深度解码 |
+| 音视频 | MP3/FLAC/OGG | 帧链流式遍历（不限文件大小）、FLAC CRC16 帧校验、OGG 页 CRC；FLAC ≤512 MiB 一律全解码 + STREAMINFO MD5 金标准比对，更大的走 `-d` 流式全解码；symphonia 深度解码 |
 | 文档 | PDF | header、xref/trailer、`%%EOF`、对象结构 |
 | 文档 | DOCX/XLSX/PPTX/ODT | ZIP 中央目录 + 内部结构（mimetype、内容类型） |
 | 文档 | TXT/CSV 文本 | 编码有效性、非法字节序列 |
-| 压缩包 | ZIP | 逐条解压测试 CRC、中央目录完整性 |
-| 压缩包 | gzip | 尾部 CRC32/ISIZE 校验 |
+| 压缩包 | ZIP | 逐条解压测试 CRC（≤512 MiB 必做，更大的记 Ok 说明）、中央目录完整性 |
+| 压缩包 | gzip | 解压 CRC32/ISIZE 校验（≤512 MiB 必做，输出上限 8 GiB，全程流式） |
 | 压缩包 | tar | 结构遍历、块对齐、结束标记 |
-| 压缩包 | 7z/RAR | 有 `7z t` 时深度测试，否则头部结构检查 |
-| 数据 | SQLite | `PRAGMA quick_check`（rusqlite bundled） |
+| 压缩包 | 7z/RAR | 签名头 + 后续头流式 CRC32（不限大小）；有 `7z t` 时深度测试，否则头部结构检查 |
+| 数据 | SQLite | `PRAGMA quick_check`（rusqlite bundled；≤512 MiB 必做，更大的记 Ok 说明） |
 | 数据 | CSV | 全量解析、列数一致性 |
 | 数据 | Parquet | `PAR1` 魔数 + footer 完整性 |
 | 通用 | 任意文件 | 空文件、魔数与扩展名不符、疑似截断、全零填充/重复填充（REPEATED_FILL）、熵异常（Ok 级说明）、哈希清单比对 |
@@ -182,6 +184,7 @@ trait Verifier {
 6. [x] **第二轮改进**：ID3v2/FLAC 误判修复 + 首因徽章列 + 大批量扫描性能修复 + 速度平滑（2026-10-15）
 7. [x] **第三轮：完美检测**：FLAC 全解码 + STREAMINFO MD5 金标准比对 + 阈值可调 + 熵采样 32 点（2026-10-15）
 8. [x] **第四轮：降噪与行业对齐**：「未执行 ≠ 损坏」降噪 + FLAC MD5 取消软阈值（GB 整轨 `-d` 流式全解码）+ REPEATED_FILL 重复填充检测（2026-10-15）
+9. [x] **第五轮：全格式真验证**：大小跳过类 Unknown 全部消灭（流式结构遍历）+ 核心校验 ≤512 MiB 必做 + DECODE_SKIPPED 降噪 + 135 测试（2026-10-15）
 
 ## 测试策略
 
@@ -191,6 +194,7 @@ trait Verifier {
 - 翻转 IDAT / 归档数据区字节（触发 CRC 不符）
 - 破坏魔数/文件头
 - 空文件、全零填充、扩展名与内容不符
+- 513 MiB 稀疏大文件：断言流式结构校验照常触发（无 `*_TOO_LARGE` 类跳过）
 - 哈希清单（sha256 / sfv / sidecar）篡改前后对比
 
 ## 风险与备注

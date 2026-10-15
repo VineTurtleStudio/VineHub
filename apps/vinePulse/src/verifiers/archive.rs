@@ -3,7 +3,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::core::dispatch::{MagicKind, expected_by_ext};
-use crate::core::{FileHint, Finding, Mode, Opts, Report, Verifier};
+use crate::core::{FileHint, Finding, FULL_CHECK_LIMIT, Mode, Opts, Report, Verifier};
 
 const EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
 /// EOCD 最小长度 22 字节 + 最大注释 65535
@@ -197,8 +197,15 @@ fn verify_archive(
         return;
     }
 
-    // 逐条 CRC 检查只对「会做深度检测」的文件执行
-    if !opts.should_deep(size) {
+    // 逐条解压 CRC 是 ZIP 的核心完整性校验：≤ FULL_CHECK_LIMIT 一律执行
+    if !opts.core_deep(size) {
+        report.push(Finding::ok(
+            "ZIP_ENTRY_CRC_SKIPPED",
+            format!(
+                "文件 {size} 字节超过 {} MiB，逐条解压 CRC 未执行（勾选「强制深度解码」可执行）",
+                FULL_CHECK_LIMIT / (1024 * 1024)
+            ),
+        ));
         return;
     }
 
@@ -323,12 +330,60 @@ pub(crate) fn read_range(
     }
 }
 
+/// 流式计算 `[off, off+len)` 的 CRC32：不整读进内存，任意大范围都可校验
+pub(crate) fn crc32_range(
+    path: &Path,
+    off: u64,
+    len: u64,
+    report: &mut Report,
+    what: &str,
+) -> Option<u32> {
+    let mut f = open_file(path, report)?;
+    if f.seek(SeekFrom::Start(off)).is_err() {
+        report.push(Finding::unknown(
+            "IO_ERROR",
+            format!("定位{what}失败"),
+            Some(off),
+        ));
+        return None;
+    }
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut left = len;
+    while left > 0 {
+        let want = left.min(buf.len() as u64) as usize;
+        match f.read(&mut buf[..want]) {
+            Ok(0) => {
+                report.push(Finding::unknown(
+                    "IO_ERROR",
+                    format!("读取{what}提前结束（范围 {len} 字节）"),
+                    Some(off),
+                ));
+                return None;
+            }
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+                left -= n as u64;
+            }
+            Err(e) => {
+                report.push(Finding::unknown(
+                    "IO_ERROR",
+                    format!("读取{what}失败：{e}"),
+                    Some(off),
+                ));
+                return None;
+            }
+        }
+    }
+    Some(hasher.finalize())
+}
+
 // ---------------------------------------------------------------------------
 // gzip
 // ---------------------------------------------------------------------------
 
-/// 解压体积上限：超过则只做头部校验
-const MAX_DECODED_BYTES: u64 = 512 * 1024 * 1024;
+/// 解压输出深度上限：超过即停止（防解压炸弹拖死），达上限记 Ok 级说明
+const MAX_DECODED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 pub struct GzipVerifier;
 
@@ -354,8 +409,16 @@ impl Verifier for GzipVerifier {
         if parse_gzip_header(&head, full, &mut report).is_none() {
             return report;
         }
-        if opts.should_deep(size) {
+        if opts.core_deep(size) {
             decode_gzip(path, &mut report);
+        } else {
+            report.push(Finding::ok(
+                "GZIP_CRC_SKIPPED",
+                format!(
+                    "文件 {size} 字节超过 {} MiB，解压 CRC 未执行（勾选「强制深度解码」可执行）",
+                    FULL_CHECK_LIMIT / (1024 * 1024)
+                ),
+            ));
         }
         report
     }
@@ -514,13 +577,12 @@ fn decode_gzip(path: &Path, report: &mut Report) {
             Ok(n) => {
                 total += n as u64;
                 if total > MAX_DECODED_BYTES {
-                    report.push(Finding::unknown(
-                        "GZIP_TOO_LARGE",
+                    report.push(Finding::ok(
+                        "GZIP_DECODE_LIMIT",
                         format!(
-                            "解压超过 {} MiB，停止深度校验",
-                            MAX_DECODED_BYTES / (1024 * 1024)
+                            "解压输出超过 {} GiB 深度上限，尾部 CRC 未校验（已解压部分无错误）",
+                            MAX_DECODED_BYTES / (1024 * 1024 * 1024)
                         ),
-                        None,
                     ));
                     return;
                 }
@@ -844,14 +906,6 @@ impl Verifier for SevenZVerifier {
             }
             return report;
         }
-        if next_size > 64 * 1024 * 1024 {
-            report.push(Finding::warning(
-                "SEVENZ_HEADER_TOO_LARGE",
-                format!("7z 后续头声明 {next_size} 字节，过大而跳过校验"),
-                Some(hdr_start),
-            ));
-            return report;
-        }
         let Some(hdr_end) = hdr_start.checked_add(next_size) else {
             report.push(Finding::corrupt(
                 "SEVENZ_BAD_OFFSET",
@@ -871,18 +925,10 @@ impl Verifier for SevenZVerifier {
             return report;
         }
 
-        let Some(hdr) = read_range(
-            path,
-            hdr_start,
-            next_size as usize,
-            &mut report,
-            "7z 后续头",
-        ) else {
+        let Some(computed) = crc32_range(path, hdr_start, next_size, &mut report, "7z 后续头")
+        else {
             return report;
         };
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&hdr);
-        let computed = hasher.finalize();
         if computed != next_crc {
             report.push(Finding::corrupt(
                 "SEVENZ_BAD_HEADER_CRC",

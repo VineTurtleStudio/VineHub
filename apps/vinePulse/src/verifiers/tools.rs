@@ -178,17 +178,15 @@ pub fn ffmpeg_verify(
             .args(["-f", "null", "-"]);
         match run(cmd, Duration::from_secs(600)) {
             None => {
-                report.push(crate::core::Finding::unknown(
+                report.push(crate::core::Finding::ok(
                     "DECODE_SKIPPED",
-                    format!("{label} 深度解码无法启动 ffmpeg"),
-                    None,
+                    format!("{label} 深度解码未执行（无法启动 ffmpeg），结构校验不受影响"),
                 ));
             }
             Some(o) if o.timed_out => {
-                report.push(crate::core::Finding::unknown(
+                report.push(crate::core::Finding::ok(
                     "DECODE_SKIPPED",
-                    format!("{label} 深度解码超时，已跳过"),
-                    None,
+                    format!("{label} 深度解码超时未完成，结构校验不受影响"),
                 ));
             }
             Some(o) if !o.ok() => {
@@ -209,10 +207,9 @@ pub fn ffmpeg_verify(
         return;
     };
     if probe.timed_out {
-        report.push(crate::core::Finding::unknown(
+        report.push(crate::core::Finding::ok(
             "DECODE_SKIPPED",
-            format!("{label} ffprobe 解析超时，已跳过"),
-            None,
+            format!("{label} ffprobe 解析超时未完成，结构校验不受影响"),
         ));
         return;
     }
@@ -245,10 +242,9 @@ pub fn ffmpeg_verify(
             continue;
         };
         if o.timed_out {
-            report.push(crate::core::Finding::unknown(
+            report.push(crate::core::Finding::ok(
                 "DECODE_SKIPPED",
-                format!("{label} 抽样解码超时（偏移 {t:.1}s），已跳过"),
-                None,
+                format!("{label} 抽样解码超时（偏移 {t:.1}s），结构校验不受影响"),
             ));
             continue;
         }

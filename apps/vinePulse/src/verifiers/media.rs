@@ -3,7 +3,7 @@
 //! 覆盖 MP4/MOV、RIFF(WAV/AVI)、Matroska/WebM、FLV、MPEG-TS、MP3、FLAC、OGG。
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::core::dispatch::{MagicKind, expected_by_ext};
@@ -1164,45 +1164,82 @@ fn parse_mp3_header(d: &[u8], i: usize) -> Option<Mp3Frame> {
     Some(Mp3Frame { len: len as usize, rate })
 }
 
-/// 从 `from` 起找一个既合法又不越界的帧头
-fn find_mp3_frame(d: &[u8], from: usize) -> Option<usize> {
-    let mut i = from;
-    while i + 4 <= d.len() {
-        if d[i] == 0xFF
-            && let Some(f) = parse_mp3_header(d, i)
-            && i + f.len <= d.len()
-        {
-            return Some(i);
+/// 尽量读满 `dst`，返回实际读到的字节数
+fn read_fill(r: &mut impl Read, dst: &mut [u8]) -> usize {
+    let mut total = 0;
+    while total < dst.len() {
+        match r.read(&mut dst[total..]) {
+            Ok(0) => break,
+            Ok(m) => total += m,
+            Err(_) => break,
         }
-        i += 1;
     }
-    None
+    total
+}
+
+/// 分块扫描：从 `from` 起找一个既合法又不越界的帧头（流式，不限文件大小）
+fn find_mp3_frame(
+    r: &mut BufReader<File>,
+    from: u64,
+    size: u64,
+) -> Option<(u64, Mp3Frame)> {
+    r.seek(SeekFrom::Start(from)).ok()?;
+    let mut base = from;
+    let mut buf = vec![0u8; 128 * 1024];
+    let mut keep = 0usize;
+    loop {
+        // 尽量填满缓冲（保留 3 字节跨块候选）
+        let mut n = 0usize;
+        while keep + n < buf.len() {
+            match r.read(&mut buf[keep + n..]) {
+                Ok(0) => break,
+                Ok(m) => n += m,
+                Err(_) => break,
+            }
+        }
+        let total = keep + n;
+        if total >= 4 {
+            let mut j = 0usize;
+            while j + 4 <= total {
+                if buf[j] == 0xFF
+                    && let Some(f) = parse_mp3_header(&buf, j)
+                {
+                    let p = base + j as u64;
+                    if p + f.len as u64 <= size {
+                        return Some((p, f));
+                    }
+                }
+                j += 1;
+            }
+        }
+        if n == 0 {
+            return None;
+        }
+        let tail = total.saturating_sub(3);
+        buf.copy_within(tail..total, 0);
+        keep = total - tail;
+        base += tail as u64;
+    }
 }
 
 fn verify_mp3(path: &Path, size: u64, report: &mut Report) {
-    if size > 512 * 1024 * 1024 {
-        report.push(Finding::unknown(
-            "MP3_TOO_LARGE",
-            "文件超过 512 MiB，跳过帧链遍历",
-            None,
-        ));
-        return;
-    }
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
+    let file = match File::open(path) {
+        Ok(f) => f,
         Err(e) => {
             io_error(report, e);
             return;
         }
     };
+    let mut r = BufReader::new(file);
 
     // ID3v2 标签
-    let mut start = 0usize;
-    if data.len() >= 10 && &data[0..3] == b"ID3" {
-        if data[6] & 0x80 != 0
-            || data[7] & 0x80 != 0
-            || data[8] & 0x80 != 0
-            || data[9] & 0x80 != 0
+    let mut start = 0u64;
+    let mut id3 = [0u8; 10];
+    if read_fill(&mut r, &mut id3) >= 10 && &id3[0..3] == b"ID3" {
+        if id3[6] & 0x80 != 0
+            || id3[7] & 0x80 != 0
+            || id3[8] & 0x80 != 0
+            || id3[9] & 0x80 != 0
         {
             report.push(Finding::corrupt(
                 "MP3_BAD_ID3",
@@ -1211,13 +1248,13 @@ fn verify_mp3(path: &Path, size: u64, report: &mut Report) {
             ));
             return;
         }
-        let tag_size = (u32::from(data[6]) << 21)
-            | (u32::from(data[7]) << 14)
-            | (u32::from(data[8]) << 7)
-            | u32::from(data[9]);
-        let footer = if data[5] & 0x10 != 0 { 10usize } else { 0 };
-        let tag_end = 10usize.saturating_add(tag_size as usize).saturating_add(footer);
-        if tag_end > data.len() {
+        let tag_size = (u32::from(id3[6]) << 21)
+            | (u32::from(id3[7]) << 14)
+            | (u32::from(id3[8]) << 7)
+            | u32::from(id3[9]);
+        let footer = if id3[5] & 0x10 != 0 { 10u64 } else { 0 };
+        let tag_end = 10u64.saturating_add(u64::from(tag_size)).saturating_add(footer);
+        if tag_end > size {
             report.push(Finding::corrupt(
                 "MP3_ID3_TRUNCATED",
                 format!("ID3v2 标签声明 {tag_size} 字节，超出文件范围（疑似截断）"),
@@ -1228,11 +1265,11 @@ fn verify_mp3(path: &Path, size: u64, report: &mut Report) {
         start = tag_end;
     }
 
-    let Some(first) = find_mp3_frame(&data, start) else {
+    let Some((first, _)) = find_mp3_frame(&mut r, start, size) else {
         report.push(Finding::corrupt(
             "MP3_NO_FRAME",
             "未找到任何合法的 MP3 帧头（文件损坏或格式不符）",
-            Some(start as u64),
+            Some(start),
         ));
         return;
     };
@@ -1242,14 +1279,14 @@ fn verify_mp3(path: &Path, size: u64, report: &mut Report) {
             report.push(Finding::corrupt(
                 "MP3_GARBAGE",
                 format!("首帧之前有 {gap} 字节无法解析的数据"),
-                Some(start as u64),
+                Some(start),
             ));
             return;
         }
         report.push(Finding::warning(
             "MP3_LEADING_DATA",
             format!("首帧之前有 {gap} 字节非音频数据"),
-            Some(start as u64),
+            Some(start),
         ));
     }
 
@@ -1258,12 +1295,15 @@ fn verify_mp3(path: &Path, size: u64, report: &mut Report) {
     let mut frames: u64 = 0;
     let mut inconsistent = false;
 
+    r.seek(SeekFrom::Start(pos)).ok();
     loop {
-        let Some(frame) = parse_mp3_header(&data, pos) else {
+        let mut h = [0u8; 4];
+        let frame = (read_fill(&mut r, &mut h) == 4).then(|| parse_mp3_header(&h, 0)).flatten();
+        let Some(frame) = frame else {
             report.push(Finding::corrupt(
                 "MP3_BAD_FRAME",
                 format!("偏移 {pos} 处帧头无法解析，帧链已断裂"),
-                Some(pos as u64),
+                Some(pos),
             ));
             return;
         };
@@ -1271,23 +1311,26 @@ fn verify_mp3(path: &Path, size: u64, report: &mut Report) {
             inconsistent = true;
             report.push(Finding::warning(
                 "MP3_INCONSISTENT",
-                format!("第 {} 帧采样率 {} Hz，与前帧 {prev_rate} Hz 不一致", frames + 1, frame.rate),
-                Some(pos as u64),
+                format!(
+                    "第 {} 帧采样率 {} Hz，与前帧 {prev_rate} Hz 不一致",
+                    frames + 1,
+                    frame.rate
+                ),
+                Some(pos),
             ));
         }
         prev_rate = frame.rate;
 
-        let end = pos + frame.len;
-        if end > data.len() {
+        let end = pos + frame.len as u64;
+        if end > size {
             report.push(Finding::corrupt(
                 "MP3_TRUNCATED",
                 format!(
-                    "第 {} 帧声明 {} 字节，超出文件末尾 {end} > {}（疑似截断）",
+                    "第 {} 帧声明 {} 字节，超出文件末尾 {end} > {size}（疑似截断）",
                     frames + 1,
-                    frame.len,
-                    data.len()
+                    frame.len
                 ),
-                Some(pos as u64),
+                Some(pos),
             ));
             return;
         }
@@ -1300,48 +1343,55 @@ fn verify_mp3(path: &Path, size: u64, report: &mut Report) {
             ));
             return;
         }
-        if end == data.len() {
+        if end == size {
             break; // 正常走到文件尾
         }
 
-        // 尾部标签
-        let rest = &data[end..];
-        if rest.len() >= 3 && &rest[..3] == b"TAG" {
-            if rest.len() != 128 {
+        // 尾部标签：读至多 8 字节窥探，随后绝对回退
+        let rest_len = size - end;
+        let mut peek = [0u8; 8];
+        let pn = read_fill(&mut r, &mut peek);
+        if pn >= 3 && &peek[..3] == b"TAG" {
+            if rest_len != 128 {
                 report.push(Finding::warning(
                     "MP3_BAD_TAIL",
-                    format!("ID3v1 标签实际 {} 字节，应为 128 字节", rest.len()),
-                    Some(end as u64),
+                    format!("ID3v1 标签实际 {rest_len} 字节，应为 128 字节"),
+                    Some(end),
                 ));
             }
             break;
         }
-        if rest.len() >= 8 && &rest[..8] == b"APETAGEX" {
+        if pn >= 8 && &peek[..8] == b"APETAGEX" {
             break;
         }
 
-        if parse_mp3_header(&data, end).is_some() {
+        r.seek(SeekFrom::Start(end)).ok();
+        // 尝试直接续帧
+        let mut h2 = [0u8; 4];
+        let cont = read_fill(&mut r, &mut h2) == 4 && parse_mp3_header(&h2, 0).is_some();
+        if cont {
+            r.seek(SeekFrom::Start(end)).ok();
             pos = end;
             continue;
         }
 
         // 帧链中断：向前搜索下一个合法帧头，其间的字节即损坏区间
-        match find_mp3_frame(&data, end + 1) {
-            Some(q) => {
+        match find_mp3_frame(&mut r, end + 1, size) {
+            Some((q, _)) => {
                 report.push(Finding::corrupt(
                     "MP3_GARBAGE",
                     format!(
                         "帧链在 {end} 处中断，其后 {} 字节无法解析（数据区被破坏），下一合法帧在 {q}",
                         q - end
                     ),
-                    Some(end as u64),
+                    Some(end),
                 ));
             }
             None => {
                 report.push(Finding::corrupt(
                     "MP3_BAD_FRAME",
                     format!("帧链在 {end} 处中断，其后没有可识别的帧头"),
-                    Some(end as u64),
+                    Some(end),
                 ));
             }
         }
@@ -1352,7 +1402,7 @@ fn verify_mp3(path: &Path, size: u64, report: &mut Report) {
         report.push(Finding::corrupt(
             "MP3_NO_FRAME",
             "文件中没有完整的 MP3 帧",
-            Some(start as u64),
+            Some(start),
         ));
     }
 }

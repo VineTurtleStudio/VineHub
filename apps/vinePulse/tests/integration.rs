@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -517,4 +517,194 @@ fn text_file_named_zip_is_corrupt() {
     let cs = codes(&r);
     assert!(cs.contains(&"MAGIC_MISMATCH"), "findings: {:?}", r.findings);
     assert!(cs.contains(&"ZIP_NO_EOCD"), "findings: {:?}", r.findings);
+}
+
+// ---------------------------------------------------------------------------
+// 超过旧 512 MiB 上限的稀疏大文件仍然被完整验证（流式结构遍历，无大小跳过）
+// ---------------------------------------------------------------------------
+
+/// 稀疏大文件：头部写字节，其余空间展开为零（不占磁盘）
+const BIG: u64 = 513 * 1024 * 1024;
+
+fn sparse(path: &Path, head: &[u8], total: u64) {
+    let mut f = File::create(path).unwrap();
+    f.write_all(head).unwrap();
+    f.set_len(total).unwrap();
+}
+
+#[test]
+fn jpeg_oversized_file_is_still_verified() {
+    let dir = temp_dir("jpeg-big");
+    let path = dir.join("big.jpg");
+    sparse(&path, &[0xFF, 0xD8, 0x05], BIG); // SOI 后直接是坏标记
+    let r = verify_file(&path, &opts());
+    let cs = codes(&r);
+    assert_eq!(r.worst(), Severity::Corrupt, "findings: {:?}", r.findings);
+    assert!(cs.contains(&"JPEG_BAD_MARKER"), "findings: {:?}", r.findings);
+    assert!(!cs.contains(&"JPEG_TOO_LARGE"), "大小跳过码应已移除");
+}
+
+#[test]
+fn gif_oversized_file_is_still_verified() {
+    let dir = temp_dir("gif-big");
+    let path = dir.join("big.gif");
+    // 签名 + 7 字节逻辑屏幕描述符（packed=0 → 无全局颜色表），之后应是块标识
+    sparse(&path, b"GIF89a\x01\x00\x01\x00\x00\x00\x00", BIG);
+    let r = verify_file(&path, &opts());
+    let cs = codes(&r);
+    assert_eq!(r.worst(), Severity::Corrupt, "findings: {:?}", r.findings);
+    assert!(cs.contains(&"GIF_BAD_BLOCK"), "findings: {:?}", r.findings);
+    assert!(!cs.contains(&"IMAGE_TOO_LARGE"), "大小跳过码应已移除");
+}
+
+#[test]
+fn bmp_oversized_file_is_still_verified() {
+    let dir = temp_dir("bmp-big");
+    let path = dir.join("big.bmp");
+    let mut head = vec![0u8; 54];
+    head[0..2].copy_from_slice(b"BM");
+    head[2..6].copy_from_slice(&u32::MAX.to_le_bytes()); // 声明 4 GiB > 实际
+    head[10..14].copy_from_slice(&54u32.to_le_bytes()); // 像素数据偏移
+    head[14..18].copy_from_slice(&40u32.to_le_bytes()); // DIB 头
+    sparse(&path, &head, BIG);
+    let r = verify_file(&path, &opts());
+    let cs = codes(&r);
+    assert_eq!(r.worst(), Severity::Corrupt, "findings: {:?}", r.findings);
+    assert!(cs.contains(&"BMP_TRUNCATED"), "findings: {:?}", r.findings);
+    assert!(!cs.contains(&"IMAGE_TOO_LARGE"), "大小跳过码应已移除");
+}
+
+#[test]
+fn mp3_oversized_file_is_still_verified() {
+    let dir = temp_dir("mp3-big");
+    let path = dir.join("big.mp3");
+    let frame = [0xFFu8, 0xFB, 0x90, 0x00]; // MPEG1 L3 128kbps/44.1kHz，帧长 417
+    {
+        let mut f = File::create(&path).unwrap();
+        f.write_all(&frame).unwrap();
+        f.set_len(BIG).unwrap();
+        // 1 MiB 处放第二帧：帧链在 417 处断裂后只需扫描 1 MiB 即可恢复
+        f.seek(SeekFrom::Start(1 << 20)).unwrap();
+        f.write_all(&frame).unwrap();
+    }
+    let r = verify_file(&path, &opts());
+    let cs = codes(&r);
+    assert_eq!(r.worst(), Severity::Corrupt, "findings: {:?}", r.findings);
+    assert!(cs.contains(&"MP3_GARBAGE"), "findings: {:?}", r.findings);
+    assert!(!cs.contains(&"MP3_TOO_LARGE"), "大小跳过码应已移除");
+}
+
+#[test]
+fn gzip_oversized_compressed_gets_skip_note() {
+    let dir = temp_dir("gzip-big");
+    let path = dir.join("big.gz");
+    sparse(&path, &[0x1F, 0x8B, 0x08, 0x00, 0, 0, 0, 0, 0, 0], BIG);
+    let r = verify_file(&path, &opts());
+    let cs = codes(&r);
+    assert!(
+        cs.contains(&"GZIP_CRC_SKIPPED"),
+        "应记 Ok 级跳过说明，findings: {:?}",
+        r.findings
+    );
+    assert!(!cs.contains(&"GZIP_TOO_LARGE"), "大小跳过码应已移除");
+    assert!(
+        r.worst().rank() <= Severity::Warning.rank(),
+        "只允许熵类提示，findings: {:?}",
+        r.findings
+    );
+}
+
+#[test]
+fn sqlite_oversized_gets_check_skip_note() {
+    let dir = temp_dir("sqlite-big");
+    let path = dir.join("big.sqlite");
+    sparse(&path, b"SQLite format 3\0", BIG);
+    let r = verify_file(&path, &opts());
+    let cs = codes(&r);
+    assert!(
+        cs.contains(&"SQLITE_CHECK_SKIPPED"),
+        "应记 Ok 级跳过说明，findings: {:?}",
+        r.findings
+    );
+    assert!(
+        r.worst().rank() <= Severity::Warning.rank(),
+        "只允许熵类提示，findings: {:?}",
+        r.findings
+    );
+}
+
+#[test]
+fn sevenz_oversized_header_is_streaming_crc_checked() {
+    let dir = temp_dir("7z-big");
+    let path = dir.join("big.7z");
+    let hdr_size: u64 = 65 * 1024 * 1024; // 超过旧的 64 MiB 跳过上限
+    // 后续头内容为全零（稀疏），其 CRC32 需与签名头声明一致
+    let next_crc = {
+        let mut h = crc32fast::Hasher::new();
+        let z = vec![0u8; 1 << 20];
+        let mut left = hdr_size;
+        while left > 0 {
+            let n = left.min(1 << 20) as usize;
+            h.update(&z[..n]);
+            left -= n as u64;
+        }
+        h.finalize()
+    };
+    let mut head = vec![0u8; 32];
+    head[..6].copy_from_slice(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]);
+    head[6] = 0;
+    head[7] = 4;
+    head[12..20].copy_from_slice(&0u64.to_le_bytes()); // next_off = 0
+    head[20..28].copy_from_slice(&hdr_size.to_le_bytes());
+    head[28..32].copy_from_slice(&next_crc.to_le_bytes());
+    let start_crc = {
+        let mut h = crc32fast::Hasher::new();
+        h.update(&head[12..32]);
+        h.finalize()
+    };
+    head[8..12].copy_from_slice(&start_crc.to_le_bytes());
+    sparse(&path, &head, 32 + hdr_size);
+
+    let r = verify_file(&path, &opts());
+    let cs = codes(&r);
+    assert!(
+        !cs.contains(&"SEVENZ_HEADER_TOO_LARGE"),
+        "超大后续头应流式校验 CRC，findings: {:?}",
+        r.findings
+    );
+    assert!(
+        r.worst().rank() <= Severity::Warning.rank(),
+        "CRC 匹配应为正常/熵类提示，findings: {:?}",
+        r.findings
+    );
+}
+
+#[test]
+fn gzip_large_decoded_output_is_fully_verified() {
+    // 513 MiB 全零：旧实现解压超 512 MiB 即中止（GZIP_TOO_LARGE），现在应完整解压校验
+    let dir = temp_dir("gzip-decode");
+    let src = dir.join("zeros.bin");
+    sparse(&src, &[], BIG);
+    let gz = dir.join("zeros.gz");
+    {
+        let mut r = File::open(&src).unwrap();
+        let mut e = flate2::write::GzEncoder::new(
+            File::create(&gz).unwrap(),
+            flate2::Compression::fast(),
+        );
+        std::io::copy(&mut r, &mut e).unwrap();
+        e.finish().unwrap();
+    }
+    let r = verify_file(&gz, &opts());
+    let cs = codes(&r);
+    assert!(
+        !cs.contains(&"GZIP_TOO_LARGE") && !cs.contains(&"GZIP_DECODE_LIMIT"),
+        "513 MiB 解压应完整执行，findings: {:?}",
+        r.findings
+    );
+    assert!(
+        r.worst().rank() <= Severity::Warning.rank(),
+        "findings: {:?}",
+        r.findings
+    );
 }
