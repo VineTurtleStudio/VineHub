@@ -15,6 +15,15 @@ import {
   type ItemRow,
 } from './api';
 import { convertFileSrc } from '@tauri-apps/api/core';
+
+/** convertFileSrc 包装：宿主/浏览器环境无 asset 协议时返回 ''，调用方自行兜底。 */
+function assetUrl(path: string): string {
+  try {
+    return convertFileSrc(path);
+  } catch {
+    return '';
+  }
+}
 import { CHUNK, currentFilter, resetChunks, resetList, state, type TreeSel } from './state';
 import { dropCategory } from './features/tree';
 import { addTagsToItem, removeTagFromItem } from './features/collections';
@@ -555,7 +564,7 @@ function loadThumb(holder: HTMLElement, row: ItemRow): void {
   if (!p) {
     p = ensureThumb(row.id)
       .then((r) => {
-        const url = convertFileSrc(r.path);
+        const url = assetUrl(r.path);
         thumbCache.set(key, url);
         return url;
       })
@@ -691,7 +700,7 @@ function openLightbox(
   if (type === 'video') {
     const v = document.createElement('video');
     v.controls = true;
-    v.src = convertFileSrc(fullPath);
+    v.src = assetUrl(fullPath);
     if (poster) v.poster = poster;
     v.addEventListener('error', () => {
       // WebView2 解不了的封装/编码（mkv、hevc 等）→ 封面兜底
@@ -709,7 +718,7 @@ function openLightbox(
     lightboxStage.appendChild(v);
   } else {
     const img = document.createElement('img');
-    img.src = convertFileSrc(fullPath);
+    img.src = assetUrl(fullPath);
     img.alt = caption;
     img.addEventListener('error', () => {
       lightboxCaption.textContent = `${caption}（预览加载失败：文件缺失或格式不受支持）`;
@@ -726,7 +735,7 @@ async function previewRow(row: ItemRow): Promise<void> {
     let poster = '';
     try {
       const r = await ensureThumb(row.id);
-      poster = convertFileSrc(r.path);
+      poster = assetUrl(r.path);
     } catch {
       // 无封面/缺 ffmpeg 照常试播
     }
@@ -1052,7 +1061,7 @@ export async function renderDetail(id: number | null): Promise<void> {
         const img = document.createElement('img');
         img.className = 'thumb-img';
         img.alt = '';
-        img.src = convertFileSrc(r.path);
+        img.src = assetUrl(r.path);
         img.style.cursor = 'zoom-in';
         img.title = '点击预览原片';
         img.addEventListener('click', () => {

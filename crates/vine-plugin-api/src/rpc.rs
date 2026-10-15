@@ -71,6 +71,120 @@ pub mod method {
     pub const VERSIONS_CLEANUP: &str = "versions.cleanup";
     /// 应用信息（便携模式/数据目录/版本）。
     pub const APP_INFO: &str = "app.info";
+    // ---- P3.3 vineCurator GUI 面覆盖 ----
+    /// 数据库信息（catalog.sqlite 路径）。
+    pub const DB_INFO: &str = "db.info";
+    /// 读取设置键值。
+    pub const SETTINGS_GET: &str = "settings.get";
+    /// 保存设置键值。
+    pub const SETTINGS_SAVE: &str = "settings.save";
+    /// 移除根目录（只删索引）。
+    pub const ROOTS_REMOVE: &str = "roots.remove";
+    /// 重定向根目录（盘符漂移）。
+    pub const ROOTS_REDIRECT: &str = "roots.redirect";
+    /// 分页列条目。
+    pub const ITEMS_LIST: &str = "items.list";
+    /// 总览计数（by_type/by_status）。
+    pub const OVERVIEW_GET: &str = "overview.get";
+    /// 条目详情。
+    pub const ITEM_GET: &str = "item.get";
+    /// 批量设置条目字段（status/rating 等）。
+    pub const ITEM_SET_FIELDS: &str = "item.setFields";
+    /// 打开路径（shell）。
+    pub const PATH_OPEN: &str = "path.open";
+    /// 定位路径（explorer /select）。
+    pub const PATH_REVEAL: &str = "path.reveal";
+    /// 分类树列表。
+    pub const CATEGORIES_LIST: &str = "categories.list";
+    /// 创建分类。
+    pub const CATEGORY_CREATE: &str = "category.create";
+    /// 重命名分类。
+    pub const CATEGORY_RENAME: &str = "category.rename";
+    /// 移动分类。
+    pub const CATEGORY_MOVE: &str = "category.move";
+    /// 删除分类。
+    pub const CATEGORY_DELETE: &str = "category.delete";
+    /// 整体替换条目分类归属。
+    pub const ITEM_CATEGORIES_SET: &str = "item.categories.set";
+    /// 批量增量归类。
+    pub const ITEM_CATEGORIES_ADD: &str = "item.categories.add";
+    /// 标签词表。
+    pub const TAGS_LIST: &str = "tags.list";
+    /// 创建标签。
+    pub const TAG_CREATE: &str = "tag.create";
+    /// 重命名标签。
+    pub const TAG_RENAME: &str = "tag.rename";
+    /// 添加标签别名。
+    pub const TAG_ALIAS_ADD: &str = "tag.alias.add";
+    /// 合并标签。
+    pub const TAGS_MERGE: &str = "tags.merge";
+    /// 批量打标。
+    pub const ITEM_TAGS_SET: &str = "item.tags.set";
+    /// 批量去标。
+    pub const ITEM_TAGS_REMOVE: &str = "item.tags.remove";
+    /// 智能集合列表。
+    pub const COLLECTIONS_LIST: &str = "collections.list";
+    /// 保存智能集合。
+    pub const COLLECTION_SAVE: &str = "collection.save";
+    /// 预览智能集合。
+    pub const COLLECTION_PREVIEW: &str = "collection.preview";
+    /// 规则列表。
+    pub const RULES_LIST: &str = "rules.list";
+    /// 保存规则。
+    pub const RULE_SAVE: &str = "rule.save";
+    /// 删除规则。
+    pub const RULE_DELETE: &str = "rule.delete";
+    /// 后台哈希任务。
+    pub const HASH_START: &str = "hash.start";
+    /// 后台元数据任务。
+    pub const META_START: &str = "meta.start";
+    /// 后台规则任务。
+    pub const RULE_START: &str = "rule.start";
+    /// 后台自动分类任务。
+    pub const AUTOCAT_START: &str = "autocat.start";
+    /// 后台重复检测任务。
+    pub const DUPE_START: &str = "dupe.start";
+    /// 后台 OCR 任务。
+    pub const OCR_START: &str = "ocr.start";
+    /// 重复报告（只读）。
+    pub const DUPES_LIST: &str = "dupes.list";
+    /// OCR 待识别数。
+    pub const OCR_PENDING: &str = "ocr.pending";
+    /// 生成/复用缩略图。
+    pub const THUMB_ENSURE: &str = "thumb.ensure";
+    /// 立即备份。
+    pub const BACKUP_NOW: &str = "backup.now";
+    /// 导出标签/分类 JSON。
+    pub const PORT_EXPORT: &str = "port.export";
+    /// 导入标签/分类 JSON。
+    pub const PORT_IMPORT: &str = "port.import";
+    /// 初始管理员（仅 users 空）。
+    pub const ADMIN_SETUP: &str = "admin.setup";
+    /// 当前会话用户。
+    pub const SESSION_GET: &str = "session.get";
+    /// 登录。
+    pub const AUTH_LOGIN: &str = "auth.login";
+    /// 退出。
+    pub const AUTH_LOGOUT: &str = "auth.logout";
+    /// 修改密码。
+    pub const AUTH_PASSWORD_CHANGE: &str = "auth.password.change";
+    /// 用户列表。
+    pub const USERS_LIST: &str = "users.list";
+    /// 创建用户。
+    pub const USER_CREATE: &str = "user.create";
+    /// 删除用户。
+    pub const USER_DELETE: &str = "user.delete";
+    /// 设置用户角色。
+    pub const USER_ROLE_SET: &str = "user.role.set";
+    /// 审计日志。
+    pub const AUDIT_LIST: &str = "audit.list";
+    // ---- P3.3 VinePalmaCursor GUI 面覆盖 ----
+    /// 由像素载荷构建 .cur 并写入指定路径。
+    pub const EXPORT_CUR_TO_PATH: &str = "file.exportCur";
+    /// 由帧载荷构建 .ani 并写入指定路径。
+    pub const EXPORT_ANI_TO_PATH: &str = "file.exportAni";
+    /// 从路径读取并自动检测格式导入。
+    pub const IMPORT_FROM_PATH: &str = "file.importPath";
     /// 取消任务（通知）。
     pub const TASK_CANCEL: &str = "task.cancel";
     /// 进度通知。

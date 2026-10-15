@@ -1,9 +1,11 @@
 //! `--rpc` 模式：sidecar JSON-RPC over stdio（协议 v1，VinePalmaCursor）。
 //!
 //! - argv 最早分流，跳过 Tauri GUI
-//! - 方法面：`file.convert`（图片/cur/ani → cur 或 ani，落盘）/ `task.cancel`
+//! - 方法面：`file.convert`（图片/cur/ani → cur 或 ani，落盘）/ `task.cancel` /
+//!   P3.3 单响应路径读写：`file.exportCur`、`file.exportAni`、`file.importPath`、
+//!   `import.file`（内存字节导入，bridge 专用）
 //! - 无状态字节转换：无配置、无数据库；ack 先回 taskId，进度走 `task.progress`，
-//!   终态以同 id 第二响应返回
+//!   终态以同 id 第二响应返回；路径导入导出为纯同步单响应（codec 无 IO 依赖）
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -25,7 +27,9 @@ use crate::codec::scale::InterpolationMode;
 use crate::codec::{ani, cur, scale};
 
 const PLUGIN_ID: &str = "vine.cursor";
-const CAPABILITIES: &[&str] = &["convert", "cancel"];
+const CAPABILITIES: &[&str] = &["convert", "cancel", "export", "import"];
+/// 内存字节导入（宿主桥接专用；plugin-api 未定义该常量，方法名在本插件内固定）。
+const METHOD_IMPORT_FILE: &str = "import.file";
 
 struct TaskEntry {
     cancel: Arc<AtomicBool>,
@@ -145,6 +149,10 @@ fn handle_request(state: &Arc<RpcState>, req: RpcRequest) {
         ),
         method::PING => success(id, json!({ "pong": true })),
         method::FILE_CONVERT => handle_file_convert(state, id, req.params),
+        method::EXPORT_CUR_TO_PATH => handle_export_cur_to_path(id, req.params),
+        method::EXPORT_ANI_TO_PATH => handle_export_ani_to_path(id, req.params),
+        method::IMPORT_FROM_PATH => handle_import_from_path(id, req.params),
+        METHOD_IMPORT_FILE => handle_import_file_bytes(id, req.params),
         method::TASK_CANCEL => handle_task_cancel(state, id, req.params),
         other => RpcResponse::error(
             Some(id),
@@ -353,6 +361,117 @@ fn handle_file_convert(
     });
 
     ack
+}
+
+// ---------- P3.3 路径导入导出（单响应，同步执行） ----------
+
+#[derive(Deserialize)]
+struct ExportCurToPathParams {
+    path: String,
+    request: crate::commands::ExportCurRequest,
+}
+
+#[derive(Deserialize)]
+struct ExportAniToPathParams {
+    path: String,
+    request: crate::commands::ExportAniRequest,
+}
+
+#[derive(Deserialize)]
+struct ImportFromPathParams {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct ImportFileParams {
+    data: Vec<u8>,
+}
+
+fn handle_export_cur_to_path(id: RequestId, params: Option<Value>) -> RpcResponse {
+    let params: ExportCurToPathParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    write_export_response(id, &params.path, crate::commands::export_cur(params.request))
+}
+
+fn handle_export_ani_to_path(id: RequestId, params: Option<Value>) -> RpcResponse {
+    let params: ExportAniToPathParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    write_export_response(id, &params.path, crate::commands::export_ani(params.request))
+}
+
+/// 编码 → 创建父目录 → 落盘 → `{path, bytes}`。
+fn write_export_response(
+    id: RequestId,
+    path: &str,
+    encoded: Result<Vec<u8>, String>,
+) -> RpcResponse {
+    if path.trim().is_empty() {
+        return invalid_params(id, "path 不能为空");
+    }
+    let bytes = match encoded {
+        Ok(b) => b,
+        Err(e) => return invalid_params(id, format!("编码失败: {e}")),
+    };
+    let out = PathBuf::from(path);
+    if let Some(parent) = out.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return RpcResponse::error(
+                    Some(id),
+                    RpcError::new(codes::PLUGIN_INTERNAL, format!("创建输出目录失败: {e}")),
+                );
+            }
+        }
+    }
+    let len = bytes.len();
+    if let Err(e) = std::fs::write(&out, &bytes) {
+        return RpcResponse::error(
+            Some(id),
+            RpcError::new(codes::PLUGIN_INTERNAL, format!("写入输出失败: {e}")),
+        );
+    }
+    success(id, json!({ "path": path, "bytes": len }))
+}
+
+fn handle_import_from_path(id: RequestId, params: Option<Value>) -> RpcResponse {
+    let params: ImportFromPathParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    if params.path.trim().is_empty() {
+        return invalid_params(id, "path 不能为空");
+    }
+    let input = PathBuf::from(&params.path);
+    if !input.is_file() {
+        return invalid_params(id, format!("输入文件不存在: {}", params.path));
+    }
+    match std::fs::read(&input) {
+        Ok(data) => decode_import_response(id, data),
+        Err(e) => RpcResponse::error(
+            Some(id),
+            RpcError::new(codes::PLUGIN_INTERNAL, format!("读取输入失败: {e}")),
+        ),
+    }
+}
+
+fn handle_import_file_bytes(id: RequestId, params: Option<Value>) -> RpcResponse {
+    let params: ImportFileParams = match serde_json::from_value(params.unwrap_or(Value::Null)) {
+        Ok(p) => p,
+        Err(e) => return invalid_params(id, format!("参数非法: {e}")),
+    };
+    decode_import_response(id, params.data)
+}
+
+/// 自动检测格式解码 → `{format, frames}`（与 `import_file` 命令返回同形）。
+fn decode_import_response(id: RequestId, data: Vec<u8>) -> RpcResponse {
+    match crate::commands::import_file(data) {
+        Ok(result) => success(id, result),
+        Err(e) => invalid_params(id, format!("解码失败: {e}")),
+    }
 }
 
 fn handle_task_cancel(state: &Arc<RpcState>, id: RequestId, params: Option<Value>) -> RpcResponse {

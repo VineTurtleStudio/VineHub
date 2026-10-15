@@ -31,9 +31,6 @@ log = "0.4"
 thiserror = "2"
 vine-plugin-api = { workspace = true }
 
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-strip = true
-panic = "abort"
+# [profile] 只能写在 workspace 根 Cargo.toml（写在此处会被忽略并触发 clippy 警告）。
+# 原意图（待 P2.1 迁移时与根 profile 合并定稿，见 VineHub README 横切约定）：
+#   codegen-units = 1 / lto = true / opt-level = "s" / strip = true / panic = "abort"

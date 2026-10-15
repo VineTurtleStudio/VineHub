@@ -1,5 +1,28 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import {
+  bridgeRequest,
+  hubInvoke,
+  hubPluginId,
+  isHubEmbedded,
+} from './host-bridge';
+
+// ---------------------------------------------------------------- 工具
+
+/** 宿主 iframe 内无 Tauri 事件系统，返回 no-op 保持调用方不崩。 */
+const safeListen = <T>(
+  event: string,
+  cb: (payload: T) => void,
+): Promise<UnlistenFn> => {
+  if (isHubEmbedded()) {
+    void event;
+    void cb;
+    return Promise.resolve(() => {});
+  }
+  return listen<T>(event, (e) => cb(e.payload));
+};
+
+// ---------------------------------------------------------------- 类型（与 Rust 侧 serde 对齐）
 
 export interface ToolStatus {
   name: string;
@@ -121,44 +144,124 @@ export interface MetaProgress {
   stats: MetaStats;
 }
 
-export const probeTools = (): Promise<ToolsReport> => invoke<ToolsReport>('probe_tools');
+// ---------------------------------------------------------------- 环境 / 设置 / 数据库
 
-export const getDbInfo = (): Promise<DbInfo> => invoke<DbInfo>('get_db_info');
+export const probeTools = (): Promise<ToolsReport> =>
+  isHubEmbedded()
+    ? hubInvoke<ToolsReport>(null, 'probe_tools')
+    : invoke<ToolsReport>('probe_tools');
 
-export const getSettings = (): Promise<SettingEntry[]> => invoke<SettingEntry[]>('get_settings');
+export const getDbInfo = (): Promise<DbInfo> =>
+  isHubEmbedded()
+    ? hubInvoke<DbInfo>('db.info', 'get_db_info')
+    : invoke<DbInfo>('get_db_info');
+
+export const getSettings = (): Promise<SettingEntry[]> =>
+  isHubEmbedded()
+    ? hubInvoke<SettingEntry[]>('settings.get', 'get_settings')
+    : invoke<SettingEntry[]>('get_settings');
 
 export const saveSettings = (entries: SettingEntry[]): Promise<void> =>
-  invoke('save_settings', { entries });
+  isHubEmbedded()
+    ? hubInvoke('settings.save', 'save_settings', { entries }).then(() => undefined)
+    : invoke('save_settings', { entries });
 
-export const listRoots = (): Promise<RootEntry[]> => invoke<RootEntry[]>('list_roots');
+// ---------------------------------------------------------------- 根目录
+
+/** RPC library.addRoot / roots.redirect 返回 camelCase root_json，映射为 snake_case。 */
+interface RootJson {
+  id: number;
+  path: string;
+  label: string;
+  itemCount: number;
+  createdAt: string;
+}
+
+const mapRoot = (r: RootJson): RootEntry => ({
+  id: r.id,
+  path: r.path,
+  label: r.label,
+  item_count: r.itemCount,
+  created_at: r.createdAt,
+});
+
+export const listRoots = (): Promise<RootEntry[]> =>
+  isHubEmbedded()
+    ? hubInvoke<{ roots: RootJson[] }>('library.roots', 'list_roots').then((r) =>
+        r.roots.map(mapRoot),
+      )
+    : invoke<RootEntry[]>('list_roots');
 
 export const addRoot = (path: string, label: string | null): Promise<RootEntry> =>
-  invoke<RootEntry>('add_root', { path, label });
+  isHubEmbedded()
+    ? hubInvoke<RootJson>('library.addRoot', 'add_root', { path, label }).then(mapRoot)
+    : invoke<RootEntry>('add_root', { path, label });
 
-export const removeRoot = (rootId: number): Promise<void> => invoke('remove_root', { rootId });
+export const removeRoot = (rootId: number): Promise<void> =>
+  isHubEmbedded()
+    ? hubInvoke('roots.remove', 'remove_root', { rootId }).then(() => undefined)
+    : invoke('remove_root', { rootId });
 
 export const redirectRoot = (rootId: number, newPath: string): Promise<RootEntry> =>
-  invoke<RootEntry>('redirect_root', { rootId, newPath });
+  isHubEmbedded()
+    ? hubInvoke<RootJson>('roots.redirect', 'redirect_root', { rootId, newPath }).then(mapRoot)
+    : invoke<RootEntry>('redirect_root', { rootId, newPath });
 
-export const startScan = (rootId: number): Promise<void> => invoke('start_scan', { rootId });
+// ---------------------------------------------------------------- 后台任务（fire-and-forget）
+
+export const startScan = (rootId: number): Promise<void> =>
+  isHubEmbedded()
+    ? hubInvoke('library.scan', 'start_scan', { rootId }).then(() => undefined)
+    : invoke('start_scan', { rootId });
 
 export const startHashJob = (rootId: number | null): Promise<void> =>
-  invoke('start_hash_job', { rootId });
+  isHubEmbedded()
+    ? hubInvoke('hash.start', 'start_hash_job', { rootId }).then(() => undefined)
+    : invoke('start_hash_job', { rootId });
 
 export const startMetaJob = (rootId: number | null, source: string): Promise<void> =>
-  invoke('start_meta_job', { rootId, source });
+  isHubEmbedded()
+    ? hubInvoke('meta.start', 'start_meta_job', { rootId, source }).then(() => undefined)
+    : invoke('start_meta_job', { rootId, source });
 
-export const cancelJob = (): Promise<void> => invoke('cancel_job');
+export const cancelJob = async (): Promise<void> => {
+  if (!isHubEmbedded()) {
+    return invoke('cancel_job');
+  }
+  const pluginId = hubPluginId();
+  if (!pluginId) return;
+  const { tasks } = await bridgeRequest<{
+    tasks: { id: string; status: string }[];
+  }>('task.list', { pluginId });
+  const running = tasks.find((t) => t.status === 'running');
+  if (running) {
+    await bridgeRequest('task.cancel', { taskId: running.id });
+  }
+};
 
-export const startDupeJob = (): Promise<void> => invoke('start_dupe_job');
+export const startDupeJob = (): Promise<void> =>
+  isHubEmbedded()
+    ? hubInvoke('dupe.start', 'start_dupe_job').then(() => undefined)
+    : invoke('start_dupe_job');
 
-export const listDupes = (): Promise<DupeGroup[]> => invoke<DupeGroup[]>('list_dupes');
+export const listDupes = (): Promise<DupeGroup[]> =>
+  isHubEmbedded()
+    ? hubInvoke<DupeGroup[]>('dupes.list', 'list_dupes')
+    : invoke<DupeGroup[]>('list_dupes');
 
 export const startOcrJob = (rootId: number | null): Promise<void> =>
-  invoke('start_ocr_job', { rootId });
+  isHubEmbedded()
+    ? hubInvoke('ocr.start', 'start_ocr_job', { rootId }).then(() => undefined)
+    : invoke('start_ocr_job', { rootId });
 
 export const ocrPendingCount = (rootId: number | null): Promise<number> =>
-  invoke<number>('ocr_pending_count', { rootId });
+  isHubEmbedded()
+    ? hubInvoke<{ pending: number }>('ocr.pending', 'ocr_pending_count', { rootId }).then(
+        (r) => r.pending,
+      )
+    : invoke<number>('ocr_pending_count', { rootId });
+
+// ---------------------------------------------------------------- 备份 / 导入导出
 
 export interface BackupReport {
   snapshot_path: string;
@@ -167,7 +270,10 @@ export interface BackupReport {
   restic_skipped: string | null;
 }
 
-export const backupNow = (): Promise<BackupReport> => invoke<BackupReport>('backup_now');
+export const backupNow = (): Promise<BackupReport> =>
+  isHubEmbedded()
+    ? hubInvoke<BackupReport>('backup.now', 'backup_now')
+    : invoke<BackupReport>('backup_now');
 
 export interface ImportReport {
   categories_created: number;
@@ -178,28 +284,34 @@ export interface ImportReport {
 }
 
 export const exportPort = (path: string): Promise<number> =>
-  invoke<number>('export_port', { path });
+  isHubEmbedded()
+    ? hubInvoke<{ count: number }>('port.export', 'export_port', { path }).then((r) => r.count)
+    : invoke<number>('export_port', { path });
 
 export const importPort = (path: string): Promise<ImportReport> =>
-  invoke<ImportReport>('import_port', { path });
+  isHubEmbedded()
+    ? hubInvoke<ImportReport>('port.import', 'import_port', { path })
+    : invoke<ImportReport>('import_port', { path });
+
+// ---------------------------------------------------------------- 进度事件（宿主模式 no-op）
 
 export const onScanProgress = (cb: (p: ScanProgress) => void): Promise<UnlistenFn> =>
-  listen<ScanProgress>('scan-progress', (e) => cb(e.payload));
+  safeListen<ScanProgress>('scan-progress', cb);
 
 export const onHashProgress = (cb: (p: HashProgress) => void): Promise<UnlistenFn> =>
-  listen<HashProgress>('hash-progress', (e) => cb(e.payload));
+  safeListen<HashProgress>('hash-progress', cb);
 
 export const onMetaProgress = (cb: (p: MetaProgress) => void): Promise<UnlistenFn> =>
-  listen<MetaProgress>('meta-progress', (e) => cb(e.payload));
+  safeListen<MetaProgress>('meta-progress', cb);
 
 export const onRuleProgress = (cb: (p: RuleProgress) => void): Promise<UnlistenFn> =>
-  listen<RuleProgress>('rule-progress', (e) => cb(e.payload));
+  safeListen<RuleProgress>('rule-progress', cb);
 
 export const onDupeProgress = (cb: (p: DupeProgress) => void): Promise<UnlistenFn> =>
-  listen<DupeProgress>('dupe-progress', (e) => cb(e.payload));
+  safeListen<DupeProgress>('dupe-progress', cb);
 
 export const onOcrProgress = (cb: (p: OcrProgress) => void): Promise<UnlistenFn> =>
-  listen<OcrProgress>('ocr-progress', (e) => cb(e.payload));
+  safeListen<OcrProgress>('ocr-progress', cb);
 
 // ---------------------------------------------------------------- 浏览
 
@@ -219,6 +331,41 @@ export interface ItemRow {
   hash_state: string;
   meta_state: string;
 }
+
+/** RPC search.items 返回 camelCase item_json，映射为 snake_case。 */
+interface ItemJson {
+  id: number;
+  rootId: number;
+  relPath: string;
+  fileName: string;
+  ext: string;
+  typeName: string;
+  size: number;
+  mtime: number;
+  status: string;
+  rating: number;
+  year: number | null;
+  missing: boolean;
+  hashState: string;
+  metaState: string;
+}
+
+const mapItem = (i: ItemJson): ItemRow => ({
+  id: i.id,
+  root_id: i.rootId,
+  rel_path: i.relPath,
+  file_name: i.fileName,
+  ext: i.ext,
+  type_name: i.typeName,
+  size: i.size,
+  mtime: i.mtime,
+  status: i.status,
+  rating: i.rating,
+  year: i.year,
+  missing: i.missing,
+  hash_state: i.hashState,
+  meta_state: i.metaState,
+});
 
 export interface ItemFilter {
   root_id?: number | null;
@@ -278,48 +425,92 @@ export interface ItemDetail {
 }
 
 export const listItems = (filter: ItemFilter): Promise<ItemPage> =>
-  invoke<ItemPage>('list_items', { filter });
+  isHubEmbedded()
+    ? hubInvoke<ItemPage>('items.list', 'list_items', { filter })
+    : invoke<ItemPage>('list_items', { filter });
 
 export const listCategories = (): Promise<CategoryNode[]> =>
-  invoke<CategoryNode[]>('list_categories');
+  isHubEmbedded()
+    ? hubInvoke<CategoryNode[]>('categories.list', 'list_categories')
+    : invoke<CategoryNode[]>('list_categories');
 
 export const getOverview = (rootId: number | null): Promise<Overview> =>
-  invoke<Overview>('get_overview', { rootId });
+  isHubEmbedded()
+    ? hubInvoke<Overview>('overview.get', 'get_overview', { rootId })
+    : invoke<Overview>('get_overview', { rootId });
 
 export const getItem = (itemId: number): Promise<ItemDetail> =>
-  invoke<ItemDetail>('get_item', { itemId });
+  isHubEmbedded()
+    ? hubInvoke<ItemDetail>('item.get', 'get_item', { itemId })
+    : invoke<ItemDetail>('get_item', { itemId });
 
 export const searchItems = (query: string, limit: number | null): Promise<ItemRow[]> =>
-  invoke<ItemRow[]>('search_items', { query, limit });
+  isHubEmbedded()
+    ? hubInvoke<{ total: number; items: ItemJson[] }>('search.items', 'search_items', {
+        query,
+        limit,
+      }).then((r) => r.items.map(mapItem))
+    : invoke<ItemRow[]>('search_items', { query, limit });
 
-export const openPath = (path: string): Promise<void> => invoke('open_path', { path });
+export const openPath = (path: string): Promise<void> =>
+  isHubEmbedded()
+    ? hubInvoke('path.open', 'open_path', { path }).then(() => undefined)
+    : invoke('open_path', { path });
 
 export const setItemFields = (
   itemIds: number[],
   fields: { status?: string | null; rating?: number | null; year?: number | null },
-): Promise<number> => invoke<number>('set_item_fields', { itemIds, ...fields });
+): Promise<number> =>
+  isHubEmbedded()
+    ? hubInvoke<{ updated: number }>('item.setFields', 'set_item_fields', {
+        itemIds,
+        ...fields,
+      }).then((r) => r.updated)
+    : invoke<number>('set_item_fields', { itemIds, ...fields });
 
-export const revealPath = (path: string): Promise<void> => invoke('reveal_path', { path });
+export const revealPath = (path: string): Promise<void> =>
+  isHubEmbedded()
+    ? hubInvoke('path.reveal', 'reveal_path', { path }).then(() => undefined)
+    : invoke('reveal_path', { path });
 
 // ---------------------------------------------------------------- 分类树 CRUD
 
 export const createCategory = (parentId: number | null, name: string): Promise<number> =>
-  invoke<number>('create_category', { parentId, name });
+  isHubEmbedded()
+    ? hubInvoke<{ id: number }>('category.create', 'create_category', { parentId, name }).then(
+        (r) => r.id,
+      )
+    : invoke<number>('create_category', { parentId, name });
 
 export const renameCategory = (categoryId: number, name: string): Promise<void> =>
-  invoke('rename_category', { categoryId, name });
+  isHubEmbedded()
+    ? hubInvoke('category.rename', 'rename_category', { categoryId, name }).then(() => undefined)
+    : invoke('rename_category', { categoryId, name });
 
 export const moveCategory = (categoryId: number, parentId: number | null): Promise<void> =>
-  invoke('move_category', { categoryId, parentId });
+  isHubEmbedded()
+    ? hubInvoke('category.move', 'move_category', { categoryId, parentId }).then(() => undefined)
+    : invoke('move_category', { categoryId, parentId });
 
 export const deleteCategory = (categoryId: number): Promise<void> =>
-  invoke('delete_category', { categoryId });
+  isHubEmbedded()
+    ? hubInvoke('category.delete', 'delete_category', { categoryId }).then(() => undefined)
+    : invoke('delete_category', { categoryId });
 
 export const setItemCategories = (itemId: number, categoryIds: number[]): Promise<void> =>
-  invoke('set_item_categories', { itemId, categoryIds });
+  isHubEmbedded()
+    ? hubInvoke('item.categories.set', 'set_item_categories', { itemId, categoryIds }).then(
+        () => undefined,
+      )
+    : invoke('set_item_categories', { itemId, categoryIds });
 
 export const addItemCategories = (itemIds: number[], path: string): Promise<number> =>
-  invoke<number>('add_item_categories', { itemIds, path });
+  isHubEmbedded()
+    ? hubInvoke<{ linked: number }>('item.categories.add', 'add_item_categories', {
+        itemIds,
+        path,
+      }).then((r) => r.linked)
+    : invoke<number>('add_item_categories', { itemIds, path });
 
 // ---------------------------------------------------------------- 标签
 
@@ -330,24 +521,47 @@ export interface TagRow {
   aliases: string[];
 }
 
-export const listTags = (): Promise<TagRow[]> => invoke<TagRow[]>('list_tags');
+export const listTags = (): Promise<TagRow[]> =>
+  isHubEmbedded()
+    ? hubInvoke<TagRow[]>('tags.list', 'list_tags')
+    : invoke<TagRow[]>('list_tags');
 
-export const createTag = (name: string): Promise<number> => invoke<number>('create_tag', { name });
+export const createTag = (name: string): Promise<number> =>
+  isHubEmbedded()
+    ? hubInvoke<{ id: number }>('tag.create', 'create_tag', { name }).then((r) => r.id)
+    : invoke<number>('create_tag', { name });
 
 export const renameTag = (tagId: number, name: string): Promise<void> =>
-  invoke('rename_tag', { tagId, name });
+  isHubEmbedded()
+    ? hubInvoke('tag.rename', 'rename_tag', { tagId, name }).then(() => undefined)
+    : invoke('rename_tag', { tagId, name });
 
 export const addTagAlias = (alias: string, tagId: number): Promise<void> =>
-  invoke('add_tag_alias', { alias, tagId });
+  isHubEmbedded()
+    ? hubInvoke('tag.alias.add', 'add_tag_alias', { alias, tagId }).then(() => undefined)
+    : invoke('add_tag_alias', { alias, tagId });
 
 export const mergeTags = (srcId: number, dstId: number): Promise<number> =>
-  invoke<number>('merge_tags', { srcId, dstId });
+  isHubEmbedded()
+    ? hubInvoke<{ moved: number }>('tags.merge', 'merge_tags', { srcId, dstId }).then(
+        (r) => r.moved,
+      )
+    : invoke<number>('merge_tags', { srcId, dstId });
 
 export const setItemTags = (itemIds: number[], tagNames: string[]): Promise<number> =>
-  invoke<number>('set_item_tags', { itemIds, tagNames });
+  isHubEmbedded()
+    ? hubInvoke<{ synced: number }>('item.tags.set', 'set_item_tags', { itemIds, tagNames }).then(
+        (r) => r.synced,
+      )
+    : invoke<number>('set_item_tags', { itemIds, tagNames });
 
 export const removeItemTags = (itemIds: number[], tagIds: number[]): Promise<number> =>
-  invoke<number>('remove_item_tags', { itemIds, tagIds });
+  isHubEmbedded()
+    ? hubInvoke<{ synced: number }>('item.tags.remove', 'remove_item_tags', {
+        itemIds,
+        tagIds,
+      }).then((r) => r.synced)
+    : invoke<number>('remove_item_tags', { itemIds, tagIds });
 
 // ---------------------------------------------------------------- 智能集合
 
@@ -359,20 +573,34 @@ export interface CollectionRow {
 }
 
 export const listCollections = (): Promise<CollectionRow[]> =>
-  invoke<CollectionRow[]>('list_collections');
+  isHubEmbedded()
+    ? hubInvoke<CollectionRow[]>('collections.list', 'list_collections')
+    : invoke<CollectionRow[]>('list_collections');
 
 export const saveCollection = (
   id: number | null,
   name: string,
   queryJson: string,
   sortOrder: number | null,
-): Promise<number> => invoke<number>('save_collection', { id, name, queryJson, sortOrder });
+): Promise<number> =>
+  isHubEmbedded()
+    ? hubInvoke<{ id: number }>('collection.save', 'save_collection', {
+        id,
+        name,
+        queryJson,
+        sortOrder,
+      }).then((r) => r.id)
+    : invoke<number>('save_collection', { id, name, queryJson, sortOrder });
 
 export const previewCollection = (
   queryJson: string,
   offset: number | null,
 ): Promise<[number, ItemRow[]]> =>
-  invoke<[number, ItemRow[]]>('preview_collection', { queryJson, offset });
+  isHubEmbedded()
+    ? hubInvoke<ItemPage>('collection.preview', 'preview_collection', { queryJson, offset }).then(
+        (r) => [r.total, r.items] as [number, ItemRow[]],
+      )
+    : invoke<[number, ItemRow[]]>('preview_collection', { queryJson, offset });
 
 // ---------------------------------------------------------------- 规则自动打标
 
@@ -403,7 +631,10 @@ export interface RuleProgress {
   stats: RuleStats;
 }
 
-export const listRules = (): Promise<RuleRow[]> => invoke<RuleRow[]>('list_rules');
+export const listRules = (): Promise<RuleRow[]> =>
+  isHubEmbedded()
+    ? hubInvoke<RuleRow[]>('rules.list', 'list_rules')
+    : invoke<RuleRow[]>('list_rules');
 
 export const saveRule = (
   id: number | null,
@@ -413,12 +644,26 @@ export const saveRule = (
   conditions: string,
   actions: string,
 ): Promise<number> =>
-  invoke<number>('save_rule', { id, name, enabled, priority, conditions, actions });
+  isHubEmbedded()
+    ? hubInvoke<{ id: number }>('rule.save', 'save_rule', {
+        id,
+        name,
+        enabled,
+        priority,
+        conditions,
+        actions,
+      }).then((r) => r.id)
+    : invoke<number>('save_rule', { id, name, enabled, priority, conditions, actions });
 
-export const deleteRule = (id: number): Promise<void> => invoke<void>('delete_rule', { id });
+export const deleteRule = (id: number): Promise<void> =>
+  isHubEmbedded()
+    ? hubInvoke('rule.delete', 'delete_rule', { id }).then(() => undefined)
+    : invoke<void>('delete_rule', { id });
 
 export const startRuleJob = (rootId: number | null): Promise<void> =>
-  invoke<void>('start_rule_job', { rootId });
+  isHubEmbedded()
+    ? hubInvoke('rule.start', 'start_rule_job', { rootId }).then(() => undefined)
+    : invoke<void>('start_rule_job', { rootId });
 
 // ---------------------------------------------------------------- 自动分类
 
@@ -436,10 +681,12 @@ export interface AutoCatProgress {
 }
 
 export const startAutocatJob = (rootId: number | null): Promise<void> =>
-  invoke<void>('start_autocat_job', { rootId });
+  isHubEmbedded()
+    ? hubInvoke('autocat.start', 'start_autocat_job', { rootId }).then(() => undefined)
+    : invoke<void>('start_autocat_job', { rootId });
 
 export const onAutocatProgress = (cb: (p: AutoCatProgress) => void): Promise<UnlistenFn> =>
-  listen<AutoCatProgress>('autocat-progress', (e) => cb(e.payload));
+  safeListen<AutoCatProgress>('autocat-progress', cb);
 
 // ---------------------------------------------------------------- 缩略图
 
@@ -449,7 +696,9 @@ export interface ThumbResult {
 }
 
 export const ensureThumb = (itemId: number): Promise<ThumbResult> =>
-  invoke<ThumbResult>('ensure_thumb', { itemId });
+  isHubEmbedded()
+    ? hubInvoke<ThumbResult>('thumb.ensure', 'ensure_thumb', { itemId })
+    : invoke<ThumbResult>('ensure_thumb', { itemId });
 
 // ---------------------------------------------------------------- 用户 / 登录 / 审计
 
@@ -472,28 +721,55 @@ export interface AuditRow {
 }
 
 export const setupAdmin = (username: string, password: string): Promise<AuthUser> =>
-  invoke<AuthUser>('setup_admin', { username, password });
+  isHubEmbedded()
+    ? hubInvoke<AuthUser>('admin.setup', 'setup_admin', { username, password })
+    : invoke<AuthUser>('setup_admin', { username, password });
 
-export const sessionUser = (): Promise<AuthUser | null> => invoke<AuthUser | null>('session_user');
+export const sessionUser = (): Promise<AuthUser | null> =>
+  isHubEmbedded()
+    ? hubInvoke<AuthUser | null>('session.get', 'session_user')
+    : invoke<AuthUser | null>('session_user');
 
 export const login = (username: string, password: string): Promise<AuthUser> =>
-  invoke<AuthUser>('login', { username, password });
+  isHubEmbedded()
+    ? hubInvoke<AuthUser>('auth.login', 'login', { username, password })
+    : invoke<AuthUser>('login', { username, password });
 
-export const logout = (): Promise<void> => invoke<void>('logout');
+export const logout = (): Promise<void> =>
+  isHubEmbedded()
+    ? hubInvoke('auth.logout', 'logout').then(() => undefined)
+    : invoke<void>('logout');
 
 export const changePassword = (oldPassword: string, newPassword: string): Promise<void> =>
-  invoke<void>('change_password', { oldPassword, newPassword });
+  isHubEmbedded()
+    ? hubInvoke('auth.password.change', 'change_password', { oldPassword, newPassword }).then(
+        () => undefined,
+      )
+    : invoke<void>('change_password', { oldPassword, newPassword });
 
-export const listUsers = (): Promise<AuthUser[]> => invoke<AuthUser[]>('list_users');
+export const listUsers = (): Promise<AuthUser[]> =>
+  isHubEmbedded()
+    ? hubInvoke<AuthUser[]>('users.list', 'list_users')
+    : invoke<AuthUser[]>('list_users');
 
 export const createUser = (username: string, password: string, role: string): Promise<number> =>
-  invoke<number>('create_user', { username, password, role });
+  isHubEmbedded()
+    ? hubInvoke<{ id: number }>('user.create', 'create_user', { username, password, role }).then(
+        (r) => r.id,
+      )
+    : invoke<number>('create_user', { username, password, role });
 
 export const deleteUser = (userId: number): Promise<void> =>
-  invoke<void>('delete_user', { userId });
+  isHubEmbedded()
+    ? hubInvoke('user.delete', 'delete_user', { userId }).then(() => undefined)
+    : invoke<void>('delete_user', { userId });
 
 export const setUserRole = (userId: number, role: string): Promise<void> =>
-  invoke<void>('set_user_role', { userId, role });
+  isHubEmbedded()
+    ? hubInvoke('user.role.set', 'set_user_role', { userId, role }).then(() => undefined)
+    : invoke<void>('set_user_role', { userId, role });
 
 export const listAudit = (limit = 50, entity: string | null = null): Promise<AuditRow[]> =>
-  invoke<AuditRow[]>('list_audit', { limit, entity });
+  isHubEmbedded()
+    ? hubInvoke<AuditRow[]>('audit.list', 'list_audit', { limit, entity })
+    : invoke<AuditRow[]>('list_audit', { limit, entity });

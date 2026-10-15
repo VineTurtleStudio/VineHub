@@ -179,7 +179,7 @@ fn handle_request(state: &Arc<RpcState>, req: RpcRequest) {
         method::CONFIG_SAVE => handle_config_save(state, id, req.params),
         method::HISTORY_LIST => handle_history_list(state, id, req.params),
         method::HISTORY_CLEAR => handle_history_clear(state, id),
-        method::HISTORY_EXPORT => handle_history_export(state, id, req.params),
+        method::HISTORY_EXPORT => handle_history_export(id, req.params),
         method::FILTER_TEST => handle_filter_test(id, req.params),
         method::VERSIONS_CLEANUP => handle_versions_cleanup(state, id, req.params),
         method::APP_INFO => handle_app_info(state, id),
@@ -558,7 +558,7 @@ fn handle_history_clear(state: &Arc<RpcState>, id: RequestId) -> RpcResponse {
     }
 }
 
-fn handle_history_export(state: &Arc<RpcState>, id: RequestId, params: Option<Value>) -> RpcResponse {
+fn handle_history_export(id: RequestId, params: Option<Value>) -> RpcResponse {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct ExportParams {

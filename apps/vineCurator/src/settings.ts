@@ -703,9 +703,11 @@ export async function initSettings(): Promise<void> {
   });
 
   el<HTMLButtonElement>('beets-browse').addEventListener('click', () => {
-    void open({ directory: false, multiple: false, title: '选择 beets library.db' }).then((sel) => {
-      if (typeof sel === 'string') beetsPathInput.value = sel;
-    });
+    void open({ directory: false, multiple: false, title: '选择 beets library.db' })
+      .then((sel) => {
+        if (typeof sel === 'string') beetsPathInput.value = sel;
+      })
+      .catch(() => {});
   });
 
   el<HTMLButtonElement>('calibre-browse').addEventListener('click', () => {
@@ -960,8 +962,12 @@ export async function initSettings(): Promise<void> {
       .catch((err) => toastRef(String(err), false));
   });
 
-  const report = await probeTools();
-  renderTools(report.tools);
+  try {
+    const report = await probeTools();
+    renderTools(report.tools);
+  } catch {
+    renderTools([]);
+  }
   await refreshRules();
   await refreshCollabView();
   await refreshDupes();

@@ -32,6 +32,6 @@ test = false
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-# 杀软偶发误杀测试/构建产物：strip 减小特征面（bin 已 test=false）
-[profile.dev]
-strip = "debuginfo"
+# 杀软偶发误杀测试/构建产物：strip 减小特征面（bin 已 test=false）。
+# [profile] 只能写在 workspace 根 Cargo.toml（写在此处会被忽略并触发 clippy 警告）。
+# 原意图（待 P2.1 迁移时合并到根 profile）：[profile.dev] strip = "debuginfo"
