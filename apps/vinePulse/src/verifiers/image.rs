@@ -949,6 +949,170 @@ fn verify_bmp_structure(path: &Path, size: u64, report: &mut Report) {
                 Some(34),
             ));
         }
+    } else if comp == 1 || comp == 2 {
+        // RLE8/RLE4 压缩流：无法预测解压后大小，但可遍历指令流验证
+        // 终止符、行宽/行数越界与数据完整性（内容级结构校验）
+        let data_len = if img_size != 0 {
+            u64::from(img_size)
+        } else {
+            size - data_off
+        };
+        if data_off.saturating_add(data_len) > size {
+            report.push(Finding::corrupt(
+                "BMP_TRUNCATED",
+                format!("RLE 数据区声明 {data_len} 字节（自偏移 {data_off} 起），文件实际不足"),
+                Some(data_off),
+            ));
+            return;
+        }
+        verify_bmp_rle(path, data_off, data_len, w, h.unsigned_abs(), comp, report);
+    }
+}
+
+/// 读满 `n` 字节；越界/短读返回 false（`cur` 保持在失败前的已消费位置）
+fn rle_read(f: &mut File, cur: &mut u64, end: u64, buf: &mut [u8]) -> bool {
+    if *cur + buf.len() as u64 > end {
+        return false;
+    }
+    if f.seek(std::io::SeekFrom::Start(*cur)).is_err() {
+        return false;
+    }
+    let mut got = 0;
+    while got < buf.len() {
+        match f.read(&mut buf[got..]) {
+            Ok(0) | Err(_) => return false,
+            Ok(k) => got += k,
+        }
+    }
+    *cur += buf.len() as u64;
+    true
+}
+
+/// RLE8/RLE4 指令流遍历。指令：`(count, value)`
+/// - `count > 0`：run-length，重复像素 `count` 次
+/// - `count == 0`：value=0 行结束、value=1 EOF、value=2 delta(dx,dy)、否则绝对模式
+fn verify_bmp_rle(
+    path: &Path,
+    data_off: u64,
+    data_len: u64,
+    w: i64,
+    h: u64,
+    comp: u32,
+    report: &mut Report,
+) {
+    let mut f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            report.push(Finding::unknown(
+                "IO_ERROR",
+                format!("打开文件失败：{e}"),
+                Some(data_off),
+            ));
+            return;
+        }
+    };
+    let end = data_off + data_len;
+    let row_px = w.max(0) as u64;
+    let mut cur = data_off;
+    let mut x = 0u64;
+    let mut y = 0u64;
+    let mut eof = false;
+    let out_of_range = |report: &mut Report, at: u64, msg: String| {
+        report.push(Finding::corrupt("BMP_RLE_OUT_OF_RANGE", msg, Some(at)));
+    };
+
+    loop {
+        let cmd_at = cur;
+        let mut op = [0u8; 2];
+        if !rle_read(&mut f, &mut cur, end, &mut op) {
+            break; // 数据在此耗尽 → 收尾判 NO_EOF
+        }
+        let count = u64::from(op[0]);
+        let value = op[1];
+        if count == 0 {
+            match value {
+                0 => {
+                    x = 0;
+                    y += 1;
+                    if y > h {
+                        out_of_range(
+                            report,
+                            cmd_at,
+                            format!("RLE 行数超过图像高度 {h}（指令处 y={y}）"),
+                        );
+                        return;
+                    }
+                }
+                1 => {
+                    eof = true;
+                    break;
+                }
+                2 => {
+                    let mut d = [0u8; 2];
+                    if !rle_read(&mut f, &mut cur, end, &mut d) {
+                        report.push(Finding::corrupt(
+                            "BMP_RLE_TRUNCATED",
+                            "delta 指令不完整（缺少位移字节）",
+                            Some(cmd_at),
+                        ));
+                        return;
+                    }
+                    x += u64::from(d[0]);
+                    y += u64::from(d[1]);
+                    if x > row_px || y > h {
+                        out_of_range(
+                            report,
+                            cmd_at,
+                            format!("RLE delta 越界（x={x} 行宽 {row_px}，y={y} 行高 {h}）"),
+                        );
+                        return;
+                    }
+                }
+                _ => {
+                    // 绝对模式：value 个像素（RLE8 逐字节，RLE4 每字节 2 像素），
+                    // 数据按偶数字节对齐
+                    let px = u64::from(value);
+                    let need = if comp == 1 { px } else { px.div_ceil(2) };
+                    let padded = (need + 1) & !1;
+                    if y >= h || x + px > row_px {
+                        out_of_range(
+                            report,
+                            cmd_at,
+                            format!("RLE 绝对模式越界（x={x}+{px} 行宽 {row_px}，y={y} 行高 {h}）"),
+                        );
+                        return;
+                    }
+                    if cur + padded > end {
+                        report.push(Finding::corrupt(
+                            "BMP_RLE_TRUNCATED",
+                            format!("RLE 绝对模式数据需要 {padded} 字节，数据区不足"),
+                            Some(cmd_at),
+                        ));
+                        return;
+                    }
+                    cur += padded;
+                    x += px;
+                }
+            }
+        } else {
+            if y >= h || x + count > row_px {
+                out_of_range(
+                    report,
+                    cmd_at,
+                    format!("RLE run 越界（x={x}+{count} 行宽 {row_px}，y={y} 行高 {h}）"),
+                );
+                return;
+            }
+            x += count;
+        }
+    }
+
+    if !eof {
+        report.push(Finding::corrupt(
+            "BMP_RLE_NO_EOF",
+            "RLE 数据缺少结束指令（00 01），压缩流不完整或已损坏",
+            Some(data_off + data_len),
+        ));
     }
 }
 
@@ -1456,5 +1620,137 @@ fn verify_tiff_structure(path: &Path, size: u64, report: &mut Report) {
         }
         off = next;
         hops += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ICO / CUR
+// ---------------------------------------------------------------------------
+
+pub struct IcoVerifier;
+
+impl Verifier for IcoVerifier {
+    fn supports(&self, hint: &FileHint) -> bool {
+        hint.magic == Some(MagicKind::Ico)
+            || (hint.magic.is_none() && expected_by_ext(&hint.ext) == Some(MagicKind::Ico))
+    }
+
+    fn verify(&self, path: &Path, _opts: &Opts) -> Report {
+        let mut report = Report::new(path.to_path_buf(), "ICO", Mode::Blind);
+        verify_ico(path, &mut report);
+        report
+    }
+}
+
+/// ICO/CUR：ICONDIR + 图像目录条目边界遍历
+fn verify_ico(path: &Path, report: &mut Report) {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            report.push(Finding::unknown("IO_ERROR", format!("打开文件失败：{e}"), None));
+            return;
+        }
+    };
+    let size = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(e) => {
+            report.push(Finding::unknown("IO_ERROR", format!("读取文件大小失败：{e}"), None));
+            return;
+        }
+    };
+    let mut r = BufReader::new(file);
+    if size < 6 {
+        report.push(Finding::corrupt(
+            "ICO_TRUNCATED",
+            format!("文件仅 {size} 字节，不足 ICONDIR（6 字节）"),
+            Some(0),
+        ));
+        return;
+    }
+    let mut head = [0u8; 6];
+    if r.read_exact(&mut head).is_err() {
+        report.push(Finding::unknown("IO_ERROR", "读取 ICONDIR 失败", Some(0)));
+        return;
+    }
+    if head[0] != 0 || head[1] != 0 || head[3] != 0 {
+        report.push(Finding::corrupt(
+            "ICO_BAD_HEADER",
+            "ICONDIR 的 reserved 字段不为 0",
+            Some(0),
+        ));
+        return;
+    }
+    if head[2] != 1 && head[2] != 2 {
+        report.push(Finding::corrupt(
+            "ICO_BAD_HEADER",
+            format!("ICONDIR type 为 {}（应为 1=ICO / 2=CUR）", head[2]),
+            Some(2),
+        ));
+        return;
+    }
+    let count = u16::from_le_bytes([head[4], head[5]]);
+    if count == 0 {
+        report.push(Finding::corrupt(
+            "ICO_NO_ENTRIES",
+            "图像目录条目数为 0",
+            Some(4),
+        ));
+        return;
+    }
+    let Some(dir_end) = (6u64).checked_add(u64::from(count) * 16) else {
+        report.push(Finding::corrupt("ICO_DIRECTORY_TRUNCATED", "目录大小溢出", Some(4)));
+        return;
+    };
+    if dir_end > size {
+        report.push(Finding::corrupt(
+            "ICO_DIRECTORY_TRUNCATED",
+            format!("目录声明 {count} 条（需要 {dir_end} 字节），超出文件范围"),
+            Some(4),
+        ));
+        return;
+    }
+    let mut entry = [0u8; 16];
+    for i in 0..count {
+        entry.iter_mut().for_each(|b| *b = 0);
+        if r.read_exact(&mut entry).is_err() {
+            report.push(Finding::unknown("IO_ERROR", "读取目录条目失败", Some(6)));
+            return;
+        }
+        let at = 6u64 + u64::from(i) * 16;
+        if entry[3] != 0 {
+            report.push(Finding::corrupt(
+                "ICO_BAD_ENTRY",
+                format!("条目 {i} 的 reserved 字节不为 0"),
+                Some(at + 3),
+            ));
+            return;
+        }
+        let bytes = u32::from_le_bytes(entry[8..12].try_into().unwrap());
+        let offset = u64::from(u32::from_le_bytes(entry[12..16].try_into().unwrap()));
+        if bytes == 0 {
+            report.push(Finding::warning(
+                "ICO_EMPTY_ENTRY",
+                format!("条目 {i} 声明图像数据为 0 字节"),
+                Some(at + 8),
+            ));
+            continue;
+        }
+        if offset.checked_add(u64::from(bytes)).is_none_or(|e| e > size) {
+            report.push(Finding::corrupt(
+                "ICO_ENTRY_OUT_OF_RANGE",
+                format!(
+                    "条目 {i} 数据区（offset={offset} size={bytes}）超出文件范围 {size}"
+                ),
+                Some(at + 12),
+            ));
+            return;
+        }
+        if offset < dir_end {
+            report.push(Finding::warning(
+                "ICO_OFFSET_OVERLAP",
+                format!("条目 {i} 数据偏移 {offset} 与目录区重叠"),
+                Some(at + 12),
+            ));
+        }
     }
 }

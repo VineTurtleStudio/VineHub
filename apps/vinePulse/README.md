@@ -8,6 +8,7 @@
 - **双模式检测**
   - 哈希模式：导入 `.sha256` / `.md5` / `.sfv` 清单，或自动寻找同名 sidecar 文件比对
   - 盲检模式：魔数识别真实类型 → 格式结构解析 → 可选深度解码
+- **全面检测模式（`-F/--full`）**：取消全部大小限制，启用内容级强化检查（归档成员嵌套递归、PDF 流解压）——慢但最彻底
 - **四级结论**：`Ok`（正常）/ `Warning`（可疑）/ `Corrupt`（确认损坏）/ `Unknown`（无法判定）
 - **精确定位**：问题附带字节偏移（offset），可指出损坏发生的位置
 - **外部工具增强**：启动时探测 `ffmpeg/ffprobe/7z`，存在则升级为深度解码测试；不存在则降级为纯 Rust 结构校验
@@ -42,6 +43,8 @@ vine-pulse [选项] <文件或目录>...
                                同名 sidecar（如 a.zip.sha256）比对
   -j, --json <输出文件>        导出 JSON 报告
   -d, --deep                   强制深度/核心校验（超过大小阈值的检查也执行）
+  -F, --full                   全面检测模式：取消全部大小限制，深度解码、核心校验
+                               与内容级强化检查（嵌套递归、流解压）一律执行
       --max-deep-size <MB>     深度解码大小阈值（默认 64；小于等于该值总是深度解码；
                                核心完整性校验（归档 CRC、SQLite/FLAC 校验）≤512 MiB 一律执行）
   -q, --quiet                  仅输出有问题的文件
@@ -71,6 +74,7 @@ vine-pulse [选项] <文件或目录>...
 - [x] **第三轮：完美检测**（2026-10-15）：FLAC 金标准校验——完整解码整段音频并按 RFC 9639 §8.2 计算 PCM MD5，与 STREAMINFO 存储值比对（等价 `flac -t` / FlacValidator）；阈值与 CLI `--max-deep-size` 可调；熵采样从头/中/尾 3 点改为全文件均匀 32 点
 - [x] **第四轮：降噪与行业对齐**（2026-10-15）：「未执行的检查」与「损坏」分离（对齐 BATON/存档行业惯例）——`FLAC_NO_MD5`/`FLAC_MD5_SKIPPED`/`FLAC_TOO_LARGE`/`LOW_ENTROPY` 均降为 Ok 级说明（详情仍可见，不再拖成未知/可疑）；FLAC MD5 取消 64 MiB 软阈值，≤512 MiB 一律全量解码金标准校验，>512 MiB 默认跳过、勾选「强制深度解码」(-d) 时改走**流式全量 MD5**（只读头部取 STREAMINFO，GB 级整轨不占内存）；新增 `REPEATED_FILL` 重复填充检测（无魔数文件 top-2 字节值占比 ≥90% → 可疑，补上低熵降级后的空档）
 - [x] **第五轮：全格式真验证**（2026-10-15）：消灭一切「大小跳过」类 Unknown——JPEG/GIF/BMP/WebP/TIFF/MP3 结构遍历全部改流式（`core::stream::ByteStream` + BufReader，内存恒定、不限文件大小），`JPEG_TOO_LARGE`/`IMAGE_TOO_LARGE`/`MP3_TOO_LARGE` 移除；zip 逐条 CRC、gzip 解压 CRC、SQLite quick_check 升级为**核心完整性校验**（`FULL_CHECK_LIMIT` ≤512 MiB 一律执行，超限只记 Ok 级说明，-d/调高阈值可强制，全程流式），`SEVENZ_HEADER_TOO_LARGE` 移除（超大后续头改流式 CRC32），gzip 解压输出上限 512 MiB → 8 GiB、超限降为 Ok 说明；`DECODE_SKIPPED`（ffmpeg/image 资源限制）降为 Ok 级；新增 8 个 513 MiB 稀疏大文件回归测试，测试 127 → 135
+- [x] **第六轮：全面检测模式与格式版图**（2026-10-15）：新增 `-F/--full` 全面检测模式（CLI/GUI/RPC 全接线，`Opts.full` 取消全部大小限制并启用内容级强化检查）；BMP RLE4/RLE8 压缩数据逐像素解码校验；新增 ELF/PE/Mach-O 二进制验证器（`verifiers/binary.rs`：头/程序头/节表结构遍历、入口与分节一致性）、HEIC/AVIF 容器（ftyp box 家族）、ICO/CUR 图标目录、TTF/OTF/WOFF/WOFF2 字体（表目录校验，`verifiers/font.rs`）、xz/bzip2/zstd/lz4 流级解压校验、ASF（WMA/WMV）容器；全面模式下 zip/tar 归档成员嵌套递归检测（仅一层、成员 ≤64 MiB，内层 finding 带成员名前缀）与 PDF FlateDecode 逐流解压校验（`/Length` 支持直接值与 `N G R` 间接引用、dict 窗口防误报、解压输出 512 MiB 炸弹上限）；测试 135 → 200 全绿
 
 ## 技术栈
 
@@ -104,13 +108,15 @@ vinePulse/
 │   │   ├── archive.rs        # ZIP 逐条 CRC、EOCD
 │   │   ├── media.rs          # [M2] MP4 box 树、AVI/WAV RIFF、MP3 帧链、FLAC CRC
 │   │   ├── doc.rs            # [M2] PDF、OOXML/ODF、文本编码
-│   │   └── data.rs           # [M2] SQLite quick_check、CSV、Parquet
+│   │   ├── data.rs           # [M2] SQLite quick_check、CSV、Parquet
+│   │   ├── binary.rs         # [第六轮] ELF/PE/Mach-O 二进制结构
+│   │   └── font.rs           # [第六轮] TTF/OTF/WOFF/WOFF2 表目录
 │   └── ui/
 │       ├── mod.rs            # [M3] 状态机、页面切换
 │       ├── scan_view.rs      # [M3] 拖拽、结果表格（过滤/排序）、进度
 │       └── detail_view.rs    # [M3] 问题详情、报告导出(JSON/HTML/CSV)
 └── tests/
-    └── integration.rs        # 运行时生成损坏样本的回归测试
+    └── integration.rs        # 运行时生成损坏样本的回归测试（另有按格式拆分的测试文件）
 ```
 
 ## 核心设计
@@ -142,6 +148,7 @@ trait Verifier {
 - **分发**：先读魔数判断真实类型，扩展名仅作提示（可发现伪装/改名的文件）
 - **深度解码可开关**：按文件大小阈值或用户设置跳过，避免大文件卡顿
 - **核心完整性校验必做**：归档逐条 CRC、gzip 解压 CRC、SQLite quick_check、FLAC MD5 在 ≤512 MiB 时一律执行（不受深度解码开关影响）；结构遍历全流式，任意大文件都不跳过
+- **全面检测模式（`-F`）**：在上述之外再开内容级强化——zip/tar 成员嵌套递归检测（一层）、PDF FlateDecode 逐流解压校验；取消全部大小上限，适合终检
 
 ## 各格式检测点
 
@@ -149,16 +156,22 @@ trait Verifier {
 |---|---|---|
 | 图片 | PNG | 逐块 CRC、IEND 存在性、尺寸一致性 |
 | 图片 | JPEG | marker 流式遍历（不限文件大小）+ 全图解码 |
-| 图片 | GIF/BMP/WebP | 流式结构遍历（不限文件大小）+ 解码 |
+| 图片 | GIF/BMP/WebP | 流式结构遍历（不限文件大小）+ 解码；BMP RLE4/RLE8 逐像素解码校验 |
+| 图片 | HEIC/AVIF | ftyp box 家族识别 + 基础容器结构 |
+| 图片 | ICO/CUR | 目录项逐枚尺寸/偏移越界检查 |
 | 音视频 | MP4/MOV | box 树遍历、长度越界、stco/stsc 索引越界；有 ffprobe 时深度解码 |
 | 音视频 | WAV/AVI | RIFF 块遍历、fmt/data 一致性 |
 | 音视频 | MP3/FLAC/OGG | 帧链流式遍历（不限文件大小）、FLAC CRC16 帧校验、OGG 页 CRC；FLAC ≤512 MiB 一律全解码 + STREAMINFO MD5 金标准比对，更大的走 `-d` 流式全解码；symphonia 深度解码 |
-| 文档 | PDF | header、xref/trailer、`%%EOF`、对象结构 |
+| 音视频 | ASF (WMA/WMV) | 头对象/子对象遍历、GUID 与长度越界 |
+| 二进制 | ELF/PE/Mach-O | 头/程序头/节表结构遍历、入口与分节一致性、截断与越界 |
+| 字体 | TTF/OTF/WOFF/WOFF2 | 表目录偏移/长度越界、表数量与校验和 |
+| 文档 | PDF | header、xref/trailer、`%%EOF`、对象结构；`-F` 逐流 FlateDecode 解压校验 |
 | 文档 | DOCX/XLSX/PPTX/ODT | ZIP 中央目录 + 内部结构（mimetype、内容类型） |
 | 文档 | TXT/CSV 文本 | 编码有效性、非法字节序列 |
-| 压缩包 | ZIP | 逐条解压测试 CRC（≤512 MiB 必做，更大的记 Ok 说明）、中央目录完整性 |
+| 压缩包 | ZIP | 逐条解压测试 CRC（≤512 MiB 必做，更大的记 Ok 说明）、中央目录完整性；`-F` 成员嵌套递归检测 |
 | 压缩包 | gzip | 解压 CRC32/ISIZE 校验（≤512 MiB 必做，输出上限 8 GiB，全程流式） |
-| 压缩包 | tar | 结构遍历、块对齐、结束标记 |
+| 压缩包 | tar | 结构遍历、块对齐、结束标记；`-F` 成员嵌套递归检测 |
+| 压缩包 | xz/bzip2/zstd/lz4 | 流级解压校验（不限大小、流式） |
 | 压缩包 | 7z/RAR | 签名头 + 后续头流式 CRC32（不限大小）；有 `7z t` 时深度测试，否则头部结构检查 |
 | 数据 | SQLite | `PRAGMA quick_check`（rusqlite bundled；≤512 MiB 必做，更大的记 Ok 说明） |
 | 数据 | CSV | 全量解析、列数一致性 |
@@ -185,10 +198,11 @@ trait Verifier {
 7. [x] **第三轮：完美检测**：FLAC 全解码 + STREAMINFO MD5 金标准比对 + 阈值可调 + 熵采样 32 点（2026-10-15）
 8. [x] **第四轮：降噪与行业对齐**：「未执行 ≠ 损坏」降噪 + FLAC MD5 取消软阈值（GB 整轨 `-d` 流式全解码）+ REPEATED_FILL 重复填充检测（2026-10-15）
 9. [x] **第五轮：全格式真验证**：大小跳过类 Unknown 全部消灭（流式结构遍历）+ 核心校验 ≤512 MiB 必做 + DECODE_SKIPPED 降噪 + 135 测试（2026-10-15）
+10. [x] **第六轮：全面检测模式与格式版图**：`-F` 全面模式 + ELF/PE/Mach-O/HEIC/AVIF/ICO/字体/xz/bz2/zstd/lz4/ASF + 归档嵌套递归 + PDF 流解压 + 200 测试（2026-10-15）
 
 ## 测试策略
 
-`tests/integration.rs` 在运行时生成样本并施加破坏手段，断言各验证器输出正确的 `Severity`：
+`tests/integration.rs` 与按格式拆分的测试文件（`image_formats` / `media` / `archive_formats` / `doc_data_formats` / `binary_formats` / `font_formats` / `compress_formats` / `full_content` 等）在运行时生成样本并施加破坏手段，断言各验证器输出正确的 `Severity`：
 
 - 截断文件（砍掉尾部 N 字节）
 - 翻转 IDAT / 归档数据区字节（触发 CRC 不符）

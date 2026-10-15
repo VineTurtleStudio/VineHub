@@ -20,6 +20,8 @@ vine-pulse —— 给文件把脉，检测各类文件是否损坏
                                以清单中的文件为扫描目标并比对哈希
   -j, --json <输出文件>        导出 JSON 报告
   -d, --deep                   强制深度/核心校验（超过大小阈值的检查也执行）
+  -F, --full                   全面检测模式：取消全部大小限制，核心校验、深度
+                               解码、全量解码与内容级强化检查全部执行（慢但最彻底）
       --max-deep-size <MB>     深度解码大小阈值（默认 64；小于等于该值总是深度解码；
                                核心完整性校验（归档 CRC、SQLite/FLAC 校验）≤512 MiB 一律执行）
   -q, --quiet                  仅输出有问题的文件
@@ -36,6 +38,7 @@ struct Args {
     manifest: Option<PathBuf>,
     json: Option<PathBuf>,
     deep: bool,
+    full: bool,
     max_deep_size_mb: Option<u64>,
     quiet: bool,
     no_color: bool,
@@ -49,6 +52,7 @@ fn parse_args() -> Result<Args, String> {
         manifest: None,
         json: None,
         deep: false,
+        full: false,
         max_deep_size_mb: None,
         quiet: false,
         no_color: false,
@@ -61,6 +65,7 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "-h" | "--help" => args.help = true,
             "-d" | "--deep" => args.deep = true,
+            "-F" | "--full" => args.full = true,
             "--max-deep-size" => {
                 let v = it.next().ok_or("缺少 --max-deep-size 的参数值")?;
                 let mb: u64 = v
@@ -155,6 +160,7 @@ fn main() -> ExitCode {
 
     let mut opts = Opts {
         deep: args.deep,
+        full: args.full,
         ..Default::default()
     };
     if let Some(mb) = args.max_deep_size_mb {

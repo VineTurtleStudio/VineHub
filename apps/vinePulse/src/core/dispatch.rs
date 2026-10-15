@@ -2,12 +2,14 @@ use std::path::Path;
 
 use super::{FileHint, Finding, Mode, Opts, Report, Severity, Verifier};
 use crate::verifiers::{
-    archive::{GzipVerifier, RarVerifier, SevenZVerifier, TarVerifier, ZipVerifier},
+    archive::{CompressVerifier, GzipVerifier, RarVerifier, SevenZVerifier, TarVerifier, ZipVerifier},
+    binary::{ElfVerifier, MachoVerifier, PeVerifier},
     data::{CsvVerifier, ParquetVerifier, SqliteVerifier},
     doc::{DocContainerVerifier, PdfVerifier, RtfVerifier, TextDocVerifier},
     generic,
-    image::{BmpVerifier, GifVerifier, JpegVerifier, PngVerifier, TiffVerifier, WebpVerifier},
+    image::{BmpVerifier, GifVerifier, IcoVerifier, JpegVerifier, PngVerifier, TiffVerifier, WebpVerifier},
     media::MediaVerifier,
+    font::FontVerifier,
 };
 
 /// 魔数识别出的文件类型
@@ -40,6 +42,16 @@ pub enum MagicKind {
     Parquet,
     Elf,
     Pe,
+    Heic,
+    Avif,
+    Ico,
+    Font,
+    Xz,
+    Bzip2,
+    Zstd,
+    Lz4,
+    Asf,
+    Macho,
 }
 
 impl MagicKind {
@@ -68,12 +80,22 @@ impl MagicKind {
             MagicKind::Webm => "WebM",
             MagicKind::Flv => "FLV",
             MagicKind::Ts => "MPEG-TS",
-            MagicKind::Sqlite => "SQLite",
-            MagicKind::Parquet => "Parquet",
-            MagicKind::Elf => "ELF",
-            MagicKind::Pe => "PE",
-        }
+        MagicKind::Sqlite => "SQLite",
+        MagicKind::Parquet => "Parquet",
+        MagicKind::Elf => "ELF",
+        MagicKind::Pe => "PE",
+        MagicKind::Heic => "HEIC",
+        MagicKind::Avif => "AVIF",
+        MagicKind::Ico => "ICO",
+        MagicKind::Font => "Font",
+        MagicKind::Xz => "xz",
+        MagicKind::Bzip2 => "bzip2",
+        MagicKind::Zstd => "zstd",
+        MagicKind::Lz4 => "LZ4",
+        MagicKind::Asf => "ASF",
+        MagicKind::Macho => "Mach-O",
     }
+}
 }
 
 /// 依据头部字节识别真实类型；识别不出返回 None
@@ -107,6 +129,31 @@ pub fn detect_magic(head: &[u8]) -> Option<MagicKind> {
     if starts(head, b"\x1f\x8b") {
         return Some(MagicKind::Gzip);
     }
+    if starts(head, &[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
+        return Some(MagicKind::Xz);
+    }
+    if starts(head, b"BZh") && head.len() >= 4 && (b'1'..=b'9').contains(&head[3]) {
+        return Some(MagicKind::Bzip2);
+    }
+    if starts(head, &[0x28, 0xB5, 0x2F, 0xFD]) {
+        return Some(MagicKind::Zstd);
+    }
+    if starts(head, &[0x04, 0x22, 0x4D, 0x18]) {
+        return Some(MagicKind::Lz4);
+    }
+    if starts(
+        head,
+        &[0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, 0xA8, 0xB2, 0x00, 0xC0, 0x4F, 0xD9, 0x25, 0x22],
+    ) {
+        return Some(MagicKind::Asf);
+    }
+    if starts(head, &[0xFE, 0xED, 0xFA, 0xCE])
+        || starts(head, &[0xFE, 0xED, 0xFA, 0xCF])
+        || starts(head, &[0xCE, 0xFA, 0xED, 0xFE])
+        || starts(head, &[0xCF, 0xFA, 0xED, 0xFE])
+    {
+        return Some(MagicKind::Macho);
+    }
     if starts(head, b"PK\x03\x04") || starts(head, b"PK\x05\x06") || starts(head, b"PK\x07\x08") {
         return Some(MagicKind::Zip);
     }
@@ -137,6 +184,26 @@ pub fn detect_magic(head: &[u8]) -> Option<MagicKind> {
     if starts(head, b"BM") && head.len() >= 14 {
         return Some(MagicKind::Bmp);
     }
+    // ICO/CUR：ICONDIR reserved=0, type=1(ICO)/2(CUR)
+    if head.len() >= 6
+        && head[0] == 0
+        && head[1] == 0
+        && (head[2] == 1 || head[2] == 2)
+        && head[3] == 0
+    {
+        return Some(MagicKind::Ico);
+    }
+    // 字体：sfnt / OpenType / 字体集合 / WOFF 系
+    if starts(head, &[0x00, 0x01, 0x00, 0x00])
+        || starts(head, b"OTTO")
+        || starts(head, b"true")
+        || starts(head, b"typ1")
+        || starts(head, b"ttcf")
+        || starts(head, b"wOFF")
+        || starts(head, b"wOF2")
+    {
+        return Some(MagicKind::Font);
+    }
     // UTF-16 BOM（FF FE / FE FF）与 MPEG 帧同步字节冲突，优先按文本处理
     if starts(head, &[0xFF, 0xFE]) || starts(head, &[0xFE, 0xFF]) {
         return None;
@@ -163,6 +230,19 @@ pub fn detect_magic(head: &[u8]) -> Option<MagicKind> {
             b"ftyp" | b"moov" | b"mdat" | b"free" | b"skip" | b"wide"
         )
     {
+        if &head[4..8] == b"ftyp" {
+            // major brand 决定 HEIC/AVIF，其余归 MP4
+            let brand = &head[8..12];
+            if matches!(
+                brand,
+                b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" | b"miaf" | b"heif"
+            ) {
+                return Some(MagicKind::Heic);
+            }
+            if matches!(brand, b"avif" | b"avis") {
+                return Some(MagicKind::Avif);
+            }
+        }
         return Some(MagicKind::Mp4);
     }
     if starts(head, &[0x1A, 0x45, 0xDF, 0xA3]) {
@@ -308,6 +388,17 @@ pub fn expected_by_ext(ext: &str) -> Option<MagicKind> {
         "flv" | "f4v" => MagicKind::Flv,
         "sqlite" | "db" | "db3" => MagicKind::Sqlite,
         "parquet" => MagicKind::Parquet,
+        "elf" | "o" | "so" | "ko" => MagicKind::Elf,
+        "exe" | "dll" | "sys" | "ocx" | "cpl" | "scr" => MagicKind::Pe,
+        "heic" | "heif" => MagicKind::Heic,
+        "avif" => MagicKind::Avif,
+        "ico" | "cur" => MagicKind::Ico,
+        "ttf" | "otf" | "ttc" | "otc" | "woff" | "woff2" => MagicKind::Font,
+        "xz" => MagicKind::Xz,
+        "bz2" | "bz" => MagicKind::Bzip2,
+        "zst" | "zstd" => MagicKind::Zstd,
+        "lz4" => MagicKind::Lz4,
+        "asf" | "wmv" | "wma" | "wax" | "wvx" => MagicKind::Asf,
         _ => return None,
     })
 }
@@ -334,6 +425,12 @@ fn registry() -> Vec<Box<dyn Verifier>> {
         Box::new(ParquetVerifier),
         Box::new(TextDocVerifier),
         Box::new(MediaVerifier),
+        Box::new(ElfVerifier),
+        Box::new(PeVerifier),
+        Box::new(IcoVerifier),
+        Box::new(FontVerifier),
+        Box::new(CompressVerifier),
+        Box::new(MachoVerifier),
     ]
 }
 

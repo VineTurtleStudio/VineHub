@@ -184,6 +184,9 @@ impl Report {
 pub struct Opts {
     /// 强制对超过 `max_deep_size` 的文件也做深度解码
     pub deep: bool,
+    /// 全面检测模式：取消全部大小限制（核心校验/深度解码/全量解码一律执行），
+    /// 并启用内容级强化检查（递归解包、全量解码）。耗时显著增加，换最彻底的覆盖。
+    pub full: bool,
     /// 小于等于该大小的文件总是做深度解码（字节）
     pub max_deep_size: u64,
     /// 采样熵低于该值时判定为低熵/全零填充
@@ -199,6 +202,7 @@ impl Default for Opts {
     fn default() -> Self {
         Self {
             deep: false,
+            full: false,
             max_deep_size: 64 * 1024 * 1024,
             entropy_threshold: 0.5,
             sidecar_hash: true,
@@ -209,18 +213,24 @@ impl Default for Opts {
 
 impl Opts {
     pub fn should_deep(&self, size: u64) -> bool {
-        self.deep || size <= self.max_deep_size
+        self.full || self.deep || size <= self.max_deep_size
     }
 
     /// 核心完整性校验是否执行（对照 [`FULL_CHECK_LIMIT`]）
     pub fn core_deep(&self, size: u64) -> bool {
-        size <= FULL_CHECK_LIMIT || self.should_deep(size)
+        self.full || size <= FULL_CHECK_LIMIT || self.should_deep(size)
+    }
+
+    /// 深度解码是否走全量档（vs 首/中/尾抽样）
+    pub fn deep_full_decode(&self, size: u64) -> bool {
+        self.full || size <= self.max_deep_size
     }
 }
 
 /// 核心完整性校验（逐条解压 CRC、gzip 尾部 CRC、SQLite quick_check、FLAC 全量 MD5 等）
 /// 的默认大小上限：**以内一律执行**，不受 `max_deep_size` 限制；超过时默认记 Ok 级说明，
 /// 勾选「强制深度解码」(-d) 或调高 `max_deep_size` 后照常执行（一律流式、内存恒定）。
+/// 全面检测模式（-F/--full）不受此限。
 pub const FULL_CHECK_LIMIT: u64 = 512 * 1024 * 1024;
 
 /// 分发器读取的文件摘要

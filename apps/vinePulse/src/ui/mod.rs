@@ -84,6 +84,8 @@ fn mode_label(mode: crate::Mode) -> &'static str {
 pub struct Settings {
     /// 强制深度解码（超过大小阈值也解码）
     pub deep: bool,
+    /// 全面检测模式（取消全部大小限制，内容级检查全开；慢但最彻底）
+    pub full: bool,
     /// 深度解码大小阈值（MB）
     pub max_deep_size_mb: u64,
     /// 低熵判定阈值（0~8）
@@ -98,6 +100,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             deep: false,
+            full: false,
             max_deep_size_mb: 64,
             entropy_threshold: 0.5,
             ffmpeg_path: String::new(),
@@ -139,6 +142,7 @@ impl Settings {
     fn to_opts(&self) -> Opts {
         Opts {
             deep: self.deep,
+            full: self.full,
             max_deep_size: self.max_deep_size_mb.saturating_mul(1024 * 1024),
             entropy_threshold: self.entropy_threshold.clamp(0.0, 8.0),
             ..Default::default()
@@ -476,6 +480,10 @@ impl PulseApp {
             ui.heading("设置");
             ui.add_space(6.0);
             egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.checkbox(
+                    &mut self.settings_draft.full,
+                    "全面检测模式（取消大小限制，深度解码与内容级检查全开；慢但最彻底）",
+                );
                 ui.checkbox(
                     &mut self.settings_draft.deep,
                     "强制深度解码（超过大小阈值的文件也做完整解码）",

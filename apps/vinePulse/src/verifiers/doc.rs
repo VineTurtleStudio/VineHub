@@ -18,7 +18,7 @@ impl Verifier for PdfVerifier {
             || (hint.magic.is_none() && expected_by_ext(&hint.ext) == Some(MagicKind::Pdf))
     }
 
-    fn verify(&self, path: &Path, _opts: &Opts) -> Report {
+    fn verify(&self, path: &Path, opts: &Opts) -> Report {
         let mut report = Report::new(path.to_path_buf(), "PDF", Mode::Blind);
         let Some(size) = file_size(path, &mut report) else {
             return report;
@@ -27,6 +27,10 @@ impl Verifier for PdfVerifier {
             return report;
         }
         verify_pdf(path, size, &mut report);
+        // 全面模式：逐流校验 FlateDecode 内容的可解压性
+        if opts.full {
+            verify_pdf_streams(path, size, &mut report);
+        }
         report
     }
 }
@@ -108,6 +112,222 @@ fn verify_pdf(path: &Path, size: u64, report: &mut Report) {
         return;
     }
     let _ = hdr_pos;
+}
+
+// ---------------------------------------------------------------------------
+// PDF 流级内容校验（全面模式）
+// ---------------------------------------------------------------------------
+
+/// 全面模式：定位带 `/Filter /FlateDecode` 的流并尝试解压，检出内容级损坏。
+///
+/// 防误报设计：`/Length` 与 `/Filter` 必须落在 stream 前**最后一个 `<<` 之后**
+/// （即本流 dict 内），否则跳过该流——宁可漏检也不误报。
+fn verify_pdf_streams(path: &Path, size: u64, report: &mut Report) {
+    const SCAN_LIMIT: u64 = 256 * 1024 * 1024;
+    const DECOMP_LIMIT: u64 = 512 * 1024 * 1024;
+    if size > SCAN_LIMIT {
+        report.push(Finding::ok(
+            "PDF_STREAMS_SKIPPED",
+            format!(
+                "文件超过 {} MiB，流级解压校验未执行",
+                SCAN_LIMIT / (1024 * 1024)
+            ),
+        ));
+        return;
+    }
+    let Some(data) = read_range(path, 0, size as usize, report, "PDF 全文") else {
+        return;
+    };
+
+    let mut scanned = 0u32;
+    let mut checked = 0u32;
+    let mut pos = 0usize;
+    while pos + 6 <= data.len() {
+        let Some(rel) = data[pos..].windows(6).position(|w| w == b"stream") else {
+            break;
+        };
+        let p = pos + rel;
+        pos = p + 6;
+        // 跳过 "endstream" 内部的 "stream"
+        if p >= 3 && &data[p - 3..p] == b"end" {
+            continue;
+        }
+        scanned += 1;
+        if scanned > 10_000 {
+            report.push(Finding::warning(
+                "PDF_TOO_MANY_STREAMS",
+                "流数量超过 10000，剩余未校验",
+                None,
+            ));
+            break;
+        }
+
+        // 本流 dict = stream 前最后一个 "<<"
+        let win_lo = p.saturating_sub(4096);
+        let Some(lt_rel) = data[win_lo..p]
+            .windows(2)
+            .rposition(|w| w == b"<<")
+        else {
+            continue;
+        };
+        let dict = &data[win_lo + lt_rel + 2..p];
+
+        // /Length：直接整数或 "N G R" 间接引用（对象定义到全文找）
+        let Some(len) = pdf_dict_length(dict, &data) else {
+            continue;
+        };
+        // /Filter：仅处理直接的单值 /FlateDecode
+        if pdf_dict_filter(dict) != 1 {
+            continue;
+        }
+        // 流数据 EOL：规范要求 \r\n 或 \n（或旧式 \r）
+        let mut s = p + 6;
+        if s + 1 < data.len() && data[s] == b'\r' && data[s + 1] == b'\n' {
+            s += 2;
+        } else if s < data.len() && (data[s] == b'\n' || data[s] == b'\r') {
+            s += 1;
+        } else {
+            continue;
+        }
+        let Some(e) = (s as u64).checked_add(len) else {
+            continue;
+        };
+        if e > data.len() as u64 {
+            report.push(Finding::corrupt(
+                "PDF_STREAM_TRUNCATED",
+                format!("第 {scanned} 个流声明 {len} 字节，超出文件范围"),
+                Some(s as u64),
+            ));
+            return;
+        }
+        // zlib 解压（限制输出上限，防压缩炸弹）
+        let decoder = flate2::read::ZlibDecoder::new(&data[s..e as usize]);
+        let mut limited = decoder.take(DECOMP_LIMIT);
+        let mut out = Vec::new();
+        match limited.read_to_end(&mut out) {
+            Ok(_) if out.len() as u64 >= DECOMP_LIMIT => {
+                report.push(Finding::warning(
+                    "PDF_STREAM_BOMB",
+                    format!("第 {scanned} 个流的解压输出达 {DECOMP_LIMIT} 字节上限（疑似压缩炸弹）"),
+                    Some(s as u64),
+                ));
+                return;
+            }
+            Ok(_) => checked += 1,
+            Err(err) => {
+                report.push(Finding::corrupt(
+                    "PDF_STREAM_DECODE_FAILED",
+                    format!("第 {scanned} 个 FlateDecode 流解压失败：{err}"),
+                    Some(s as u64),
+                ));
+                return;
+            }
+        }
+    }
+    if checked > 0 {
+        report.push(Finding::ok(
+            "PDF_STREAMS_CHECKED",
+            format!("{checked} 个 FlateDecode 流全部解压通过"),
+        ));
+    }
+}
+
+/// 从 dict 中取最后一个 `/Length`：直接整数，或 `N G R` 间接引用（对象定义到全文找）
+fn pdf_dict_length(dict: &[u8], data: &[u8]) -> Option<u64> {
+    let mut i = data_chunk_rfind(dict, b"/Length")?;
+    i += 7;
+    i = skip_ws(dict, i);
+    let n1 = parse_dec(dict, i)?;
+    let n1_end = i + n1;
+    let n1_val: u64 = std::str::from_utf8(&dict[i..n1_end]).ok()?.parse().ok()?;
+    let j = skip_ws(dict, n1_end);
+    // 间接引用：`N G R`
+    if j < dict.len() && dict[j].is_ascii_digit() {
+        let n2 = parse_dec(dict, j)?;
+        let g_end = j + n2;
+        let k = skip_ws(dict, g_end);
+        if k < dict.len() && dict[k] == b'R' {
+            return resolve_length_ref(data, n1_val);
+        }
+        return None;
+    }
+    Some(n1_val)
+}
+
+/// 解析 `N G obj` 后的整数（PDF 间接对象取值）
+fn resolve_length_ref(data: &[u8], obj_num: u64) -> Option<u64> {
+    let needle = format!("{obj_num} ");
+    let mut from = 0usize;
+    while let Some(rel) = data[from..]
+        .windows(needle.len())
+        .position(|w| w == needle.as_bytes())
+    {
+        let p = from + rel;
+        from = p + needle.len();
+        // 数字边界：前一字符不能是数字（避免 "15 0 obj" 被当成对象 5）
+        if p > 0 && data[p - 1].is_ascii_digit() {
+            continue;
+        }
+        let mut i = skip_ws(data, from);
+        let Some(n2) = parse_dec(data, i) else {
+            continue;
+        };
+        i = skip_ws(data, i + n2);
+        if i + 3 > data.len() || &data[i..i + 3] != b"obj" {
+            continue;
+        }
+        i = skip_ws(data, i + 3);
+        let Some(n) = parse_dec(data, i) else {
+            continue;
+        };
+        if let Ok(val) = std::str::from_utf8(&data[i..i + n]).ok()?.parse::<u64>() {
+            return Some(val);
+        }
+    }
+    None
+}
+
+fn pdf_dict_filter(dict: &[u8]) -> u8 {
+    let Some(mut i) = data_chunk_rfind(dict, b"/Filter") else {
+        return 0;
+    };
+    i = skip_ws(dict, i + 7);
+    if i >= dict.len() {
+        return 2;
+    }
+    if dict[i..].starts_with(b"/FlateDecode") {
+        1
+    } else {
+        // 数组形式（多过滤器组合）或其它过滤器，一律跳过
+        2
+    }
+}
+
+/// 返回最后一次出现 `pat` 的起始下标
+fn data_chunk_rfind(hay: &[u8], pat: &[u8]) -> Option<usize> {
+    if hay.len() < pat.len() {
+        return None;
+    }
+    (0..=hay.len() - pat.len())
+        .rev()
+        .find(|&i| &hay[i..i + pat.len()] == pat)
+}
+
+fn skip_ws(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() && (b[i] == b' ' || b[i] == b'\t' || b[i] == b'\r' || b[i] == b'\n') {
+        i += 1;
+    }
+    i
+}
+
+/// 解析十进制数，返回消耗的字节数
+fn parse_dec(b: &[u8], i: usize) -> Option<usize> {
+    let start = i;
+    let mut i = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    (i > start).then_some(i - start)
 }
 
 // ---------------------------------------------------------------------------

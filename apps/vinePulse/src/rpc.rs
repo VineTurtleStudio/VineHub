@@ -173,6 +173,7 @@ fn handle_scan_start(
         Err(e) => return invalid_params(id, format!("参数非法: {e}")),
     };
     let deep = params.deep.unwrap_or(false);
+    let full = params.full.unwrap_or(false);
 
     let path = PathBuf::from(&params.path);
     if !path.exists() {
@@ -225,6 +226,7 @@ fn handle_scan_start(
     std::thread::spawn(move || {
         let opts = Opts {
             deep,
+            full,
             ..Default::default()
         };
         let start = std::time::Instant::now();

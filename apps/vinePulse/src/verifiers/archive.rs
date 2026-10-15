@@ -1,9 +1,9 @@
-﻿use std::fs::File;
+use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::core::dispatch::{MagicKind, expected_by_ext};
-use crate::core::{FileHint, Finding, FULL_CHECK_LIMIT, Mode, Opts, Report, Verifier};
+use crate::core::{FileHint, Finding, FULL_CHECK_LIMIT, Mode, Opts, Report, Severity, Verifier};
 
 const EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
 /// EOCD 最小长度 22 字节 + 最大注释 65535
@@ -228,10 +228,23 @@ fn verify_archive(
         let mut hasher = crc32fast::Hasher::new();
         let mut buf = vec![0u8; 64 * 1024];
         let mut read_err: Option<std::io::Error> = None;
+        // 全面模式：同时收集成员内容（上限 64 MiB）用于嵌套递归检测
+        let mut data: Vec<u8> = Vec::new();
+        let mut data_oversized = false;
         loop {
             match entry.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => hasher.update(&buf[..n]),
+                Ok(n) => {
+                    hasher.update(&buf[..n]);
+                    if opts.full && !data_oversized {
+                        if data.len() + n <= 64 * 1024 * 1024 {
+                            data.extend_from_slice(&buf[..n]);
+                        } else {
+                            data_oversized = true;
+                            data = Vec::new();
+                        }
+                    }
+                }
                 Err(e) => {
                     read_err = Some(e);
                     break;
@@ -265,7 +278,67 @@ fn verify_archive(
                 format!("条目 {name} 的 CRC 不匹配：记录 {stored_crc:08x}，实际 {computed:08x}"),
                 Some(data_start),
             ));
+        } else if opts.full && !data_oversized && !data.is_empty() {
+            nested_check(&data, &name, opts, report);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 全面模式：嵌套压缩/归档成员的递归结构检测（只递归一层）
+// ---------------------------------------------------------------------------
+
+static NESTED_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 成员内容是嵌套的压缩/归档格式时，写临时文件跑一层结构检测，
+/// 内层 finding 带成员名前缀合并进外层报告。仅 `opts.full` 执行。
+fn nested_check(data: &[u8], member_name: &str, opts: &Opts, report: &mut Report) {
+    if !opts.full || data.len() < 8 {
+        return;
+    }
+    let Some(m) = crate::core::dispatch::detect_magic(&data[..data.len().min(512)]) else {
+        return;
+    };
+    if !matches!(
+        m,
+        MagicKind::Zip
+            | MagicKind::Gzip
+            | MagicKind::SevenZ
+            | MagicKind::Rar
+            | MagicKind::Tar
+            | MagicKind::Xz
+            | MagicKind::Bzip2
+            | MagicKind::Zstd
+            | MagicKind::Lz4
+    ) {
+        return;
+    }
+    let ext = Path::new(member_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    let tmp = std::env::temp_dir().join(format!(
+        "vine-pulse-nested-{}-{}.{}",
+        std::process::id(),
+        NESTED_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        ext
+    ));
+    if std::fs::write(&tmp, data).is_err() {
+        return;
+    }
+    let mut io = opts.clone();
+    io.full = false; // 只递归一层
+    io.deep = false;
+    let inner = crate::core::dispatch::verify_file(&tmp, &io);
+    let _ = std::fs::remove_file(&tmp);
+    for f in inner.findings {
+        if f.severity == Severity::Ok {
+            continue;
+        }
+        report.push(Finding {
+            message: format!("[{member_name}] {}", f.message),
+            ..f
+        });
     }
 }
 
@@ -622,7 +695,7 @@ impl Verifier for TarVerifier {
             || (hint.magic.is_none() && expected_by_ext(&hint.ext) == Some(MagicKind::Tar))
     }
 
-    fn verify(&self, path: &Path, _opts: &Opts) -> Report {
+    fn verify(&self, path: &Path, opts: &Opts) -> Report {
         let mut report = Report::new(path.to_path_buf(), "tar", Mode::Blind);
         let Some(size) = file_size(path, &mut report) else {
             return report;
@@ -633,12 +706,12 @@ impl Verifier for TarVerifier {
         let Some(f) = open_file(path, &mut report) else {
             return report;
         };
-        verify_tar(f, size, &mut report);
+        verify_tar(f, size, opts, &mut report);
         report
     }
 }
 
-fn verify_tar(mut f: File, size: u64, report: &mut Report) {
+fn verify_tar(mut f: File, size: u64, opts: &Opts, report: &mut Report) {
     let mut off = 0u64;
     let mut entries = 0u64;
     let mut end_seen = false;
@@ -761,6 +834,17 @@ fn verify_tar(mut f: File, size: u64, report: &mut Report) {
             ));
             return;
         };
+
+        // 全面模式：常规文件成员（≤64 MiB）做嵌套递归结构检测
+        if opts.full && (block[156] == 0 || block[156] == b'0') && sz > 0 && sz <= 64 * 1024 * 1024
+        {
+            let name_len = block[..100].iter().position(|&b| b == 0).unwrap_or(100);
+            let name = String::from_utf8_lossy(&block[..name_len]).to_string();
+            if let Ok(content) = read_at(&mut f, off + 512, sz as usize) {
+                nested_check(&content, &name, opts, report);
+            }
+        }
+
         off = next;
     }
 
@@ -1351,4 +1435,299 @@ fn verify_rar5(f: &mut File, size: u64, report: &mut Report) -> Option<bool> {
         off = next;
     }
     Some(false)
+}
+
+// ---------------------------------------------------------------------------
+// 单流压缩格式：xz / bzip2 / zstd / lz4 frame（头结构校验，无解压依赖）
+// ---------------------------------------------------------------------------
+
+pub struct CompressVerifier;
+
+impl Verifier for CompressVerifier {
+    fn supports(&self, hint: &FileHint) -> bool {
+        matches!(
+            hint.magic,
+            Some(MagicKind::Xz | MagicKind::Bzip2 | MagicKind::Zstd | MagicKind::Lz4)
+        ) || (hint.magic.is_none()
+            && matches!(
+                expected_by_ext(&hint.ext),
+                Some(MagicKind::Xz | MagicKind::Bzip2 | MagicKind::Zstd | MagicKind::Lz4)
+            ))
+    }
+
+    fn verify(&self, path: &Path, opts: &Opts) -> Report {
+        let hint = match FileHint::probe(path) {
+            Ok(h) => h,
+            Err(e) => {
+                let mut report = Report::new(path.to_path_buf(), "compress", Mode::Blind);
+                report.push(Finding::unknown(
+                    "IO_ERROR",
+                    format!("无法读取文件：{e}"),
+                    None,
+                ));
+                return report;
+            }
+        };
+        let kind = hint.magic.or_else(|| expected_by_ext(&hint.ext));
+        let label = match kind {
+            Some(MagicKind::Bzip2) => "bzip2",
+            Some(MagicKind::Zstd) => "zstd",
+            Some(MagicKind::Lz4) => "LZ4",
+            _ => "xz",
+        };
+        let mut report = Report::new(path.to_path_buf(), label, Mode::Blind);
+        let size = hint.size;
+        if size == 0 {
+            return report;
+        }
+        let Some(file) = File::open(path).ok() else {
+            report.push(Finding::unknown("IO_ERROR", "打开文件失败", None));
+            return report;
+        };
+        let mut r = BufReader::new(file);
+        match kind {
+            Some(MagicKind::Bzip2) => verify_bzip2(&mut r, size, &mut report),
+            Some(MagicKind::Zstd) => verify_zstd(&mut r, size, &mut report),
+            Some(MagicKind::Lz4) => verify_lz4(&mut r, size, &mut report),
+            _ => verify_xz(&mut r, size, &mut report),
+        }
+        let _ = opts;
+        report
+    }
+}
+
+/// 从 `off` 读满 `n` 字节；短读返回 None
+fn read_slice(r: &mut BufReader<File>, off: u64, n: usize) -> Option<Vec<u8>> {
+    r.seek(SeekFrom::Start(off)).ok()?;
+    let mut buf = vec![0u8; n];
+    r.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// xz：流头（flags + CRC32）与流尾（footer CRC + flags 一致性）
+fn verify_xz(r: &mut BufReader<File>, size: u64, report: &mut Report) {
+    if size < 12 {
+        report.push(Finding::corrupt(
+            "XZ_TRUNCATED",
+            format!("文件仅 {size} 字节，不足 xz 流头（12 字节）"),
+            Some(0),
+        ));
+        return;
+    }
+    let Some(hdr) = read_slice(r, 0, 12) else {
+        report.push(Finding::unknown("IO_ERROR", "读取 xz 流头失败", Some(0)));
+        return;
+    };
+    if hdr[0..6] != [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00] {
+        report.push(Finding::corrupt("XZ_BAD_MAGIC", "缺少 xz 签名", Some(0)));
+        return;
+    }
+    let flags = [hdr[6], hdr[7]];
+    if flags[0] != 0 {
+        report.push(Finding::corrupt(
+            "XZ_BAD_FLAGS",
+            format!("流标志首字节为 0x{:02X}（应为 0）", flags[0]),
+            Some(6),
+        ));
+        return;
+    }
+    let stored = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
+    let actual = crc32fast::hash(&flags);
+    if stored != actual {
+        report.push(Finding::corrupt(
+            "XZ_BAD_HEADER_CRC",
+            format!("流头 CRC32 为 {stored:#010X}，实际 {actual:#010X}"),
+            Some(8),
+        ));
+        return;
+    }
+    // 末尾 10 字节为流 footer：CRC32(4) + backward_size(4) + flags(2)
+    if size >= 22 {
+        let Some(foot) = read_slice(r, size - 10, 10) else {
+            report.push(Finding::unknown("IO_ERROR", "读取 xz 流尾失败", None));
+            return;
+        };
+        let stored_f = u32::from_le_bytes(foot[0..4].try_into().unwrap());
+        let actual_f = crc32fast::hash(&foot[4..10]);
+        if stored_f != actual_f {
+            report.push(Finding::corrupt(
+                "XZ_BAD_FOOTER_CRC",
+                format!("流尾 CRC32 为 {stored_f:#010X}，实际 {actual_f:#010X}"),
+                Some(size - 10),
+            ));
+            return;
+        }
+        if [foot[8], foot[9]] != flags {
+            report.push(Finding::corrupt(
+                "XZ_BAD_FLAGS",
+                "流尾标志与流头不一致",
+                Some(size - 2),
+            ));
+        }
+    }
+}
+
+/// bzip2：头（BZh + 块大小级别）+ 首块 π 标志 + 尾部组合子 EOF 标志
+fn verify_bzip2(r: &mut BufReader<File>, size: u64, report: &mut Report) {
+    if size < 10 {
+        report.push(Finding::corrupt(
+            "BZIP2_TRUNCATED",
+            format!("文件仅 {size} 字节，不足 bzip2 头"),
+            Some(0),
+        ));
+        return;
+    }
+    let Some(hdr) = read_slice(r, 0, 10) else {
+        report.push(Finding::unknown("IO_ERROR", "读取 bzip2 头失败", Some(0)));
+        return;
+    };
+    if hdr[0..3] != *b"BZh" {
+        report.push(Finding::corrupt("BZIP2_BAD_MAGIC", "缺少 BZh 签名", Some(0)));
+        return;
+    }
+    if !('1'..='9').contains(&(hdr[3] as char)) {
+        report.push(Finding::corrupt(
+            "BZIP2_BAD_LEVEL",
+            format!("块大小级别为 '{}'（应为 1-9）", hdr[3] as char),
+            Some(3),
+        ));
+        return;
+    }
+    // 第一个块起始标志（π 序列）
+    if hdr[4..10] != [0x31, 0x41, 0x59, 0x26, 0x53, 0x59] {
+        report.push(Finding::corrupt(
+            "BZIP2_BAD_BLOCK",
+            "头之后缺少首个块起始标志（π 序列），数据已损坏",
+            Some(4),
+        ));
+        return;
+    }
+    // 尾部 12 字节：结束组合子 (1772453850905417) + combined CRC
+    if size >= 22 {
+        let Some(tail) = read_slice(r, size - 12, 12) else {
+            report.push(Finding::unknown("IO_ERROR", "读取 bzip2 尾部失败", None));
+            return;
+        };
+        if tail[0..8] != [0x17, 0x72, 0x45, 0x38, 0x50, 0x90, 0x54, 0x17] {
+            report.push(Finding::corrupt(
+                "BZIP2_NO_EOF",
+                "文件尾部缺少结束标志（疑似截断）",
+                Some(size - 12),
+            ));
+        }
+    }
+}
+
+/// zstd：帧头描述符保留位 + 帧头长度自洽
+fn verify_zstd(r: &mut BufReader<File>, size: u64, report: &mut Report) {
+    if size < 5 {
+        report.push(Finding::corrupt(
+            "ZSTD_TRUNCATED",
+            format!("文件仅 {size} 字节，不足 zstd 帧头"),
+            Some(0),
+        ));
+        return;
+    }
+    let Some(hdr) = read_slice(r, 0, 5) else {
+        report.push(Finding::unknown("IO_ERROR", "读取 zstd 帧头失败", Some(0)));
+        return;
+    };
+    if hdr[0..4] != [0x28, 0xB5, 0x2F, 0xFD] {
+        report.push(Finding::corrupt("ZSTD_BAD_MAGIC", "缺少 zstd 签名", Some(0)));
+        return;
+    }
+    let desc = hdr[4];
+    if desc & 0x18 != 0 {
+        report.push(Finding::corrupt(
+            "ZSTD_BAD_DESCRIPTOR",
+            format!("帧头描述符保留位为 1（{desc:#04X}）"),
+            Some(4),
+        ));
+        return;
+    }
+    let fcs_flag = desc >> 6;
+    let single = desc & 0x20 != 0;
+    let dict_flag = (desc >> 1) & 0x03;
+    // 帧头长度（不含魔数与描述符）
+    let mut hdr_len = 1usize; // 描述符本身
+    if !single {
+        hdr_len += 1; // Window_Descriptor
+    }
+    hdr_len += match dict_flag {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 4,
+    };
+    hdr_len += match fcs_flag {
+        0 => usize::from(single), // 单段时用 1 字节 FCS
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    if size < 4 + hdr_len as u64 {
+        report.push(Finding::corrupt(
+            "ZSTD_TRUNCATED",
+            format!("声明帧头 {hdr_len} 字节，文件仅 {size} 字节"),
+            Some(4),
+        ));
+    }
+}
+
+/// lz4 frame：魔数 + 版本/保留位 + 头边界（不解压内容）
+fn verify_lz4(r: &mut BufReader<File>, size: u64, report: &mut Report) {
+    if size < 7 {
+        report.push(Finding::corrupt(
+            "LZ4_TRUNCATED",
+            format!("文件仅 {size} 字节，不足 lz4 帧头（7 字节）"),
+            Some(0),
+        ));
+        return;
+    }
+    let Some(hdr) = read_slice(r, 0, 7) else {
+        report.push(Finding::unknown("IO_ERROR", "读取 lz4 帧头失败", Some(0)));
+        return;
+    };
+    if hdr[0..4] != [0x04, 0x22, 0x4D, 0x18] {
+        report.push(Finding::corrupt("LZ4_BAD_MAGIC", "缺少 lz4 帧签名", Some(0)));
+        return;
+    }
+    let flg = hdr[4];
+    if flg & 0xE0 != 0x40 {
+        report.push(Finding::corrupt(
+            "LZ4_BAD_HEADER",
+            format!("版本字段为 {:#04X}（应为 010b）", flg & 0xE0),
+            Some(4),
+        ));
+        return;
+    }
+    if flg & 0x02 != 0 {
+        report.push(Finding::corrupt(
+            "LZ4_BAD_HEADER",
+            "FLG 保留位（bit1）不为 0",
+            Some(4),
+        ));
+        return;
+    }
+    let bd = hdr[5];
+    if bd & 0x8F != 0 {
+        report.push(Finding::corrupt(
+            "LZ4_BAD_HEADER",
+            format!("BD 保留位不为 0（{bd:#04X}）"),
+            Some(5),
+        ));
+        return;
+    }
+    // 头完整长度：FLG + BD + [DictID(4)] + HC
+    let mut hdr_len = 7u64;
+    if flg & 0x01 != 0 {
+        hdr_len += 4;
+    }
+    if size < hdr_len {
+        report.push(Finding::corrupt(
+            "LZ4_TRUNCATED",
+            format!("声明帧头 {hdr_len} 字节，文件仅 {size} 字节"),
+            Some(0),
+        ));
+    }
 }

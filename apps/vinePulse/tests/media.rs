@@ -614,3 +614,172 @@ fn id3_tag_len_parses_synchsafe_and_footer() {
     // 非 ID3 开头 → None
     assert_eq!(dispatch::id3_tag_len(b"fLaC...."), None);
 }
+
+// ---------------------------------------------------------------------------
+// HEIF（HEIC / AVIF）
+// ---------------------------------------------------------------------------
+
+/// 最小合成 HEIC：ftyp(heic) + meta(fullbox, 内含 hdlr) + mdat
+fn heic_file(major: &[u8; 4]) -> Vec<u8> {
+    let mut b = Vec::new();
+    // ftyp: size=24
+    b.extend_from_slice(&24u32.to_be_bytes());
+    b.extend_from_slice(b"ftyp");
+    b.extend_from_slice(major);
+    b.extend_from_slice(&0u32.to_be_bytes());
+    b.extend_from_slice(b"mif1");
+    b.extend_from_slice(b"miaf");
+    // meta: size=44（8 头 + 4 version/flags + 32 hdlr）
+    b.extend_from_slice(&44u32.to_be_bytes());
+    b.extend_from_slice(b"meta");
+    b.extend_from_slice(&0u32.to_be_bytes());
+    // hdlr: size=32
+    b.extend_from_slice(&32u32.to_be_bytes());
+    b.extend_from_slice(b"hdlr");
+    b.extend_from_slice(&0u32.to_be_bytes()); // version/flags
+    b.extend_from_slice(&0u32.to_be_bytes()); // pre_defined
+    b.extend_from_slice(b"pict"); // handler_type
+    b.extend_from_slice(&[0u8; 12]); // reserved
+    // mdat: size=64
+    b.extend_from_slice(&64u32.to_be_bytes());
+    b.extend_from_slice(b"mdat");
+    b.extend_from_slice(&[0x55u8; 56]);
+    b
+}
+
+fn write_heic(tag: &str, name: &str, data: &[u8]) -> std::path::PathBuf {
+    let dir = temp_dir(tag);
+    let path = dir.join(name);
+    fs::write(&path, data).unwrap();
+    path
+}
+
+#[test]
+fn heic_valid_is_ok_without_moov() {
+    let path = write_heic("heic-ok", "ok.heic", &heic_file(b"heic"));
+    let r = verify_file(&path, &opts());
+    // HEIF 没有 moov box：不得判为损坏
+    assert_eq!(r.worst(), Severity::Ok, "findings: {:?}", r.findings);
+    assert_eq!(r.file_type, "HEIC");
+}
+
+#[test]
+fn avif_brand_detected() {
+    let path = write_heic("avif-ok", "ok.avif", &heic_file(b"avif"));
+    let r = verify_file(&path, &opts());
+    assert_eq!(r.worst(), Severity::Ok, "findings: {:?}", r.findings);
+    assert_eq!(r.file_type, "AVIF");
+}
+
+#[test]
+fn heic_truncated_mdat_is_corrupt() {
+    let mut data = heic_file(b"heic");
+    // 把 mdat 的声明长度改大到文件外
+    let at = data.len() - 64;
+    data[at..at + 4].copy_from_slice(&0x1000u32.to_be_bytes());
+    let path = write_heic("heic-trunc", "trunc.heic", &data);
+    let r = verify_file(&path, &opts());
+    let cs: Vec<&'static str> = r.findings.iter().map(|f| f.code).collect();
+    assert!(cs.contains(&"MP4_TRUNCATED"), "findings: {:?}", r.findings);
+    assert_eq!(r.worst(), Severity::Corrupt, "findings: {:?}", r.findings);
+}
+
+#[test]
+fn heic_brand_wins_over_mp4_extension() {
+    // .mp4 扩展名但 brand 是 heic → 仍按 HEIC 识别（魔数优先）；
+    // 扩展名与内容不符会额外给一条 MAGIC_MISMATCH 警告，但不得判损坏
+    let path = write_heic("heic-mis", "misnamed.mp4", &heic_file(b"heic"));
+    let r = verify_file(&path, &opts());
+    assert_eq!(r.file_type, "HEIC", "findings: {:?}", r.findings);
+    assert_ne!(r.worst(), Severity::Corrupt, "findings: {:?}", r.findings);
+    let cs: Vec<&'static str> = r.findings.iter().map(|f| f.code).collect();
+    assert!(cs.contains(&"MAGIC_MISMATCH"), "findings: {:?}", r.findings);
+}
+
+// ---------------------------------------------------------------------------
+// ASF（WMV / WMA）
+// ---------------------------------------------------------------------------
+
+const ASF_HDR_GUID: [u8; 16] = [
+    0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, 0xA8, 0xB2, 0x00, 0xC0, 0x4F, 0xD9, 0x25, 0x22,
+];
+const ASF_DATA_OBJECT_GUID: [u8; 16] = [
+    0x36, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, 0xA6, 0xD9, 0x00, 0xAA, 0x00, 0x62, 0xCE, 0x6C,
+];
+
+/// 最小 ASF：头对象 + 一个 Data Object（24 字节）
+fn asf_file(object_guid: &[u8; 16], object_size: u64, n_objects: u32, reserved: [u8; 2]) -> Vec<u8> {
+    let header_size = 30 + object_size;
+    let mut b = Vec::new();
+    b.extend_from_slice(&ASF_HDR_GUID);
+    b.extend_from_slice(&header_size.to_le_bytes());
+    b.extend_from_slice(&n_objects.to_le_bytes());
+    b.extend_from_slice(&reserved);
+    b.extend_from_slice(object_guid);
+    b.extend_from_slice(&object_size.to_le_bytes());
+    // 对象负载（大小为 object_size - 24）
+    b.extend_from_slice(&vec![0u8; (object_size - 24) as usize]);
+    b
+}
+
+#[test]
+fn asf_valid_is_ok() {
+    let path = write_heic(
+        "asf-ok",
+        "ok.wmv",
+        &asf_file(&ASF_DATA_OBJECT_GUID, 24, 1, [0x01, 0xFF]),
+    );
+    let r = verify_file(&path, &opts());
+    assert_eq!(r.worst(), Severity::Ok, "findings: {:?}", r.findings);
+    assert_eq!(r.file_type, "ASF");
+}
+
+#[test]
+fn asf_object_beyond_header_is_corrupt() {
+    // 对象声明 1000 字节，头对象只有 1030？不——header_size 由 object_size 算出，
+    // 这里让 header_size 固定而对象过大：构造后改写头部大小字段
+    let mut data = asf_file(&ASF_DATA_OBJECT_GUID, 24, 1, [0x01, 0xFF]);
+    // 把对象大小改为 1000（头大小字段保持 54）
+    let obj_at = 30 + 16;
+    data[obj_at..obj_at + 8].copy_from_slice(&1000u64.to_le_bytes());
+    let path = write_heic("asf-oob", "oob.wmv", &data);
+    let r = verify_file(&path, &opts());
+    let cs: Vec<&'static str> = r.findings.iter().map(|f| f.code).collect();
+    assert!(
+        cs.contains(&"ASF_OBJECT_OUT_OF_RANGE") || cs.contains(&"ASF_BAD_HEADER_SIZE"),
+        "findings: {:?}",
+        r.findings
+    );
+    assert_eq!(r.worst(), Severity::Corrupt, "findings: {:?}", r.findings);
+}
+
+#[test]
+fn asf_bad_reserved_is_corrupt() {
+    let path = write_heic(
+        "asf-rsv",
+        "rsv.asf",
+        &asf_file(&ASF_DATA_OBJECT_GUID, 24, 1, [0x00, 0x00]),
+    );
+    let r = verify_file(&path, &opts());
+    let cs: Vec<&'static str> = r.findings.iter().map(|f| f.code).collect();
+    assert!(cs.contains(&"ASF_BAD_HEADER"), "findings: {:?}", r.findings);
+    assert_eq!(r.worst(), Severity::Corrupt, "findings: {:?}", r.findings);
+}
+
+#[test]
+fn asf_missing_data_object_is_warning() {
+    // 用一个非 Data 的对象 GUID（如 Header Extension）
+    let other: [u8; 16] = [
+        0xA5, 0x03, 0xD3, 0xBD, 0xA9, 0xBA, 0x11, 0xCF, 0x8E, 0xE6, 0x00, 0xC0, 0x0C, 0x20, 0x53,
+        0x65,
+    ];
+    let path = write_heic(
+        "asf-nodata",
+        "nodata.wma",
+        &asf_file(&other, 24, 1, [0x01, 0xFF]),
+    );
+    let r = verify_file(&path, &opts());
+    let cs: Vec<&'static str> = r.findings.iter().map(|f| f.code).collect();
+    assert!(cs.contains(&"ASF_NO_DATA"), "findings: {:?}", r.findings);
+    assert_ne!(r.worst(), Severity::Corrupt, "findings: {:?}", r.findings);
+}

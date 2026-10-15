@@ -1,6 +1,8 @@
 pub mod archive;
+pub mod binary;
 pub mod data;
 pub mod doc;
+pub mod font;
 pub mod generic;
 pub mod image;
 pub mod media;

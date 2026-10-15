@@ -12,6 +12,8 @@ use crate::core::{FileHint, Finding, Mode, Opts, Report, Severity, Verifier};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MediaKind {
     Mp4,
+    Heif,
+    Asf,
     Wav,
     Avi,
     Mkv,
@@ -27,6 +29,8 @@ impl MediaKind {
     fn label(self) -> &'static str {
         match self {
             MediaKind::Mp4 => "MP4",
+            MediaKind::Heif => "HEIF",
+            MediaKind::Asf => "ASF",
             MediaKind::Wav => "WAV",
             MediaKind::Avi => "AVI",
             MediaKind::Mkv => "Matroska",
@@ -43,8 +47,7 @@ impl MediaKind {
     fn is_container(self) -> bool {
         matches!(
             self,
-            MediaKind::Mp4
-                | MediaKind::Avi
+            MediaKind::Mp4 | MediaKind::Asf | MediaKind::Avi
                 | MediaKind::Mkv
                 | MediaKind::Webm
                 | MediaKind::Flv
@@ -72,6 +75,8 @@ fn media_kind_of(hint: &FileHint) -> Option<MediaKind> {
     if let Some(k) = hint.magic {
         return match k {
             MagicKind::Mp4 => Some(MediaKind::Mp4),
+            MagicKind::Heic | MagicKind::Avif => Some(MediaKind::Heif),
+            MagicKind::Asf => Some(MediaKind::Asf),
             MagicKind::Wav => Some(MediaKind::Wav),
             MagicKind::Avi => Some(MediaKind::Avi),
             MagicKind::Mkv => Some(MediaKind::Mkv),
@@ -95,6 +100,8 @@ fn media_kind_of(hint: &FileHint) -> Option<MediaKind> {
 
     let kind = match expected_by_ext(&hint.ext)? {
         MagicKind::Mp4 => MediaKind::Mp4,
+        MagicKind::Heic | MagicKind::Avif => MediaKind::Heif,
+        MagicKind::Asf => MediaKind::Asf,
         MagicKind::Wav => MediaKind::Wav,
         MagicKind::Avi => MediaKind::Avi,
         MagicKind::Mkv => MediaKind::Mkv,
@@ -140,7 +147,9 @@ impl Verifier for MediaVerifier {
         }
 
         match kind {
-            MediaKind::Mp4 => verify_mp4(path, size, &mut report),
+            MediaKind::Mp4 => verify_mp4(path, size, &mut report, false),
+            MediaKind::Heif => verify_mp4(path, size, &mut report, true),
+            MediaKind::Asf => verify_asf(path, size, &mut report),
             MediaKind::Wav | MediaKind::Avi => verify_riff(path, size, &mut report, kind),
             MediaKind::Mkv | MediaKind::Webm => verify_ebml(path, size, &mut report),
             MediaKind::Flv => verify_flv(path, size, &mut report),
@@ -162,6 +171,135 @@ fn has_corrupt(report: &Report) -> bool {
         .findings
         .iter()
         .any(|f| f.severity == Severity::Corrupt)
+}
+
+// ---------------------------------------------------------------------------
+// ASF（WMV / WMA / ASF 流）
+// ---------------------------------------------------------------------------
+
+/// ASF Header Object GUID（魔数），Data Object GUID 用于数据存在性检查
+const ASF_HEADER_GUID: [u8; 16] = [
+    0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, 0xA8, 0xB2, 0x00, 0xC0, 0x4F, 0xD9, 0x25, 0x22,
+];
+const ASF_DATA_GUID: [u8; 16] = [
+    0x36, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, 0xA6, 0xD9, 0x00, 0xAA, 0x00, 0x62, 0xCE, 0x6C,
+];
+
+/// ASF：头对象（GUID + 大小 + 对象计数 + 保留字节）与对象表边界遍历
+fn verify_asf(path: &Path, size: u64, report: &mut Report) {
+    let mut r = match Stream::open(path) {
+        Ok(r) => r,
+        Err(e) => {
+            io_error(report, e);
+            return;
+        }
+    };
+    if size < 30 {
+        report.push(Finding::corrupt(
+            "ASF_TRUNCATED",
+            format!("文件仅 {size} 字节，不足 ASF 头对象（30 字节）"),
+            Some(0),
+        ));
+        return;
+    }
+    let mut head = [0u8; 30];
+    if r.read_at(0, &mut head) < 30 {
+        io_error(report, std::io::Error::other("读取 ASF 头失败"));
+        return;
+    }
+    if head[0..16] != ASF_HEADER_GUID {
+        report.push(Finding::corrupt(
+            "ASF_BAD_MAGIC",
+            "缺少 ASF Header Object GUID",
+            Some(0),
+        ));
+        return;
+    }
+    let header_size = u64::from_le_bytes(head[16..24].try_into().unwrap());
+    let n_objects = u32::from_le_bytes(head[24..28].try_into().unwrap());
+    if header_size < 30 || header_size > size {
+        report.push(Finding::corrupt(
+            "ASF_BAD_HEADER_SIZE",
+            format!("Header Object Size 为 {header_size}，超出文件范围 {size}"),
+            Some(16),
+        ));
+        return;
+    }
+    if head[28] != 0x01 || head[29] != 0xFF {
+        report.push(Finding::corrupt(
+            "ASF_BAD_HEADER",
+            format!("保留字节为 {:02X} {:02X}（应为 01 FF）", head[28], head[29]),
+            Some(28),
+        ));
+        return;
+    }
+    let mut off = 30u64;
+    let mut visited = 0u32;
+    let mut has_data = false;
+    while off < header_size {
+        let mut guid = [0u8; 16];
+        if r.read_at(off, &mut guid) < 16 {
+            report.push(Finding::corrupt(
+                "ASF_TRUNCATED",
+                format!("偏移 {off} 处对象头不完整（疑似截断）"),
+                Some(off),
+            ));
+            return;
+        }
+        let mut szb = [0u8; 8];
+        if r.read_at(off + 16, &mut szb) < 8 {
+            report.push(Finding::corrupt(
+                "ASF_TRUNCATED",
+                format!("偏移 {off} 处对象大小字段不完整（疑似截断）"),
+                Some(off + 16),
+            ));
+            return;
+        }
+        let obj_size = u64::from_le_bytes(szb);
+        if obj_size < 24 {
+            report.push(Finding::corrupt(
+                "ASF_BAD_OBJECT",
+                format!("偏移 {off} 的对象声明 {obj_size} 字节，小于对象头（24）"),
+                Some(off + 16),
+            ));
+            return;
+        }
+        if off.checked_add(obj_size).is_none_or(|e| e > header_size) {
+            report.push(Finding::corrupt(
+                "ASF_OBJECT_OUT_OF_RANGE",
+                format!("偏移 {off} 的对象（{obj_size} 字节）超出头对象范围 {header_size}"),
+                Some(off + 16),
+            ));
+            return;
+        }
+        if guid == ASF_DATA_GUID {
+            has_data = true;
+        }
+        off += obj_size;
+        visited += 1;
+        if visited > n_objects.saturating_add(1) {
+            report.push(Finding::warning(
+                "ASF_COUNT_MISMATCH",
+                format!("对象表实际条目数超过头声明的 {n_objects}"),
+                Some(24),
+            ));
+            return;
+        }
+    }
+    if visited != n_objects {
+        report.push(Finding::warning(
+            "ASF_COUNT_MISMATCH",
+            format!("头声明 {n_objects} 个对象，实际遍历到 {visited} 个"),
+            Some(24),
+        ));
+    }
+    if !has_data {
+        report.push(Finding::warning(
+            "ASF_NO_DATA",
+            "缺少 Data Object（媒体数据不存在）",
+            None,
+        ));
+    }
 }
 
 fn io_error(report: &mut Report, e: std::io::Error) {
@@ -233,7 +371,7 @@ impl Stream {
 /// 顶层/子层 box 中属于「容器」的类型（内部还装着子 box）
 const MP4_CONTAINERS: &[&[u8; 4]] = &[
     b"moov", b"trak", b"mdia", b"minf", b"stbl", b"udta", b"edts", b"mvex", b"dinf", b"moof",
-    b"traf", b"mfra", b"skip",
+    b"traf", b"mfra", b"skip", b"iprp", b"ipco",
 ];
 
 #[derive(Default)]
@@ -245,7 +383,7 @@ struct Mp4Ctx {
     stop: bool,
 }
 
-fn verify_mp4(path: &Path, size: u64, report: &mut Report) {
+fn verify_mp4(path: &Path, size: u64, report: &mut Report, heif: bool) {
     let mut r = match Stream::open(path) {
         Ok(r) => r,
         Err(e) => {
@@ -273,7 +411,8 @@ fn verify_mp4(path: &Path, size: u64, report: &mut Report) {
             Some(0),
         ));
     }
-    if !ctx.moov {
+    // HEIC/AVIF 影像没有 moov（元数据在 meta box 里），不作缺失判定
+    if !heif && !ctx.moov {
         report.push(Finding::corrupt(
             "MP4_NO_MOOV",
             "缺少 moov 影片元数据 box，文件可能被截断",
@@ -2397,6 +2536,8 @@ fn verify_ts(path: &Path, size: u64, report: &mut Report) {
 fn decode_code(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Mp4 => "MP4_DECODE_FAILED",
+        MediaKind::Heif => "HEIF_DECODE_FAILED",
+        MediaKind::Asf => "ASF_DECODE_FAILED",
         MediaKind::Wav => "WAV_DECODE_FAILED",
         MediaKind::Avi => "AVI_DECODE_FAILED",
         MediaKind::Mkv | MediaKind::Webm => "MKV_DECODE_FAILED",
@@ -2417,7 +2558,7 @@ fn deep_decode(path: &Path, kind: MediaKind, opts: &Opts, report: &mut Report) {
     if !opts.should_deep(size) {
         return;
     }
-    let full = size <= opts.max_deep_size;
+    let full = opts.deep_full_decode(size);
     if kind.is_container() {
         crate::verifiers::tools::ffmpeg_verify(path, full, report, decode_code(kind), kind.label());
     } else {

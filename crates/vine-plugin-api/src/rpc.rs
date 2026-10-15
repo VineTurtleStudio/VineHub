@@ -423,6 +423,9 @@ pub struct ScanStartParams {
     /// 强制深度解码（超过大小阈值也解码）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep: Option<bool>,
+    /// 全面检测模式：取消全部大小限制，深度解码与内容级强化检查全开（慢但最彻底）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full: Option<bool>,
 }
 
 /// `scan.start` 的即时 result（终态响应另带 ok/bad/report）。
