@@ -1527,11 +1527,23 @@ fn verify_mp3(path: &Path, size: u64, report: &mut Report) {
                 ));
             }
             None => {
-                report.push(Finding::corrupt(
-                    "MP3_BAD_FRAME",
-                    format!("帧链在 {end} 处中断，其后没有可识别的帧头"),
-                    Some(end),
-                ));
+                // 末尾无更多有效帧：多为填充/标签数据（ID3v1/APE 已在上面拦截），
+                // 真实播放器到此即停，不算损坏。小量尾部填充降为 Ok 说明。
+                let tail = size - end;
+                if tail <= 64 * 1024 {
+                    report.push(Finding::ok(
+                        "MP3_TAIL_PADDING",
+                        format!("音频帧链正常结束，末尾 {tail} 字节为填充/标签数据（不影响播放）"),
+                    ));
+                } else {
+                    report.push(Finding::warning(
+                        "MP3_TAIL_DATA",
+                        format!(
+                            "音频帧链在 {end} 处结束，其后 {tail} 字节没有有效帧（可能是尾部标签或数据异常，非确认损坏）"
+                        ),
+                        Some(end),
+                    ));
+                }
             }
         }
         return;
@@ -1712,17 +1724,23 @@ fn verify_flac(path: &Path, size: u64, opts: &Opts, report: &mut Report) {
             return;
         }
     };
-    if data.len() < 4 || &data[0..4] != b"fLaC" {
+    // 跳过 ID3v2 前缀（抓轨/下载常给 FLAC 贴标签），fLaC 在标签之后
+    let base = if data.len() >= 10 && &data[0..3] == b"ID3" {
+        crate::core::dispatch::id3_tag_len(&data).unwrap_or(0)
+    } else {
+        0
+    };
+    if data.len() < base + 4 || &data[base..base + 4] != b"fLaC" {
         report.push(Finding::corrupt(
             "FLAC_BAD_MAGIC",
             "缺少 fLaC 签名，文件头已损坏",
-            Some(0),
+            Some(base as u64),
         ));
         return;
     }
 
     // 元数据块链
-    let mut p = 4usize;
+    let mut p = base + 4;
     let mut last = false;
     let mut blocks = 0u32;
     let mut has_streaminfo = false;
@@ -1777,7 +1795,7 @@ fn verify_flac(path: &Path, size: u64, opts: &Opts, report: &mut Report) {
             report.push(Finding::corrupt(
                 "FLAC_BAD_METADATA",
                 "元数据块数量异常（结构已损坏）",
-                Some(4),
+                Some(base as u64 + 4),
             ));
             return;
         }
@@ -1787,7 +1805,7 @@ fn verify_flac(path: &Path, size: u64, opts: &Opts, report: &mut Report) {
         report.push(Finding::corrupt(
             "FLAC_NO_STREAMINFO",
             "缺少 STREAMINFO 块，无法读取音频流信息",
-            Some(4),
+            Some(base as u64 + 4),
         ));
         return;
     }
@@ -2058,9 +2076,16 @@ fn streaminfo_md5(si: &[u8]) -> Option<[u8; 16]> {
 /// 把 GB 级文件读进内存）。STREAMINFO 固定为第一个元数据块（type 0、长 34），
 /// 开头 42 字节内即可拿到。
 fn read_head_streaminfo_md5(path: &Path) -> Option<[u8; 16]> {
-    use std::io::Read as _;
+    use std::io::{Read as _, Seek as _, SeekFrom};
 
     let mut f = File::open(path).ok()?;
+    // 跳过 ID3v2 前缀（带标签的 FLAC fLaC 不在偏移 0）
+    let mut stream_start = 0u64;
+    let mut id3 = [0u8; 10];
+    if f.read_exact(&mut id3).is_ok() && &id3[0..3] == b"ID3" {
+        stream_start = crate::core::dispatch::id3_tag_len(&id3).unwrap_or(0) as u64;
+    }
+    f.seek(SeekFrom::Start(stream_start)).ok()?;
     let mut buf = [0u8; 4 + 4 + 34];
     f.read_exact(&mut buf).ok()?;
     if &buf[0..4] != b"fLaC" || buf[4] & 0x7F != 0 {

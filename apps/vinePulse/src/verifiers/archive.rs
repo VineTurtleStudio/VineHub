@@ -213,17 +213,35 @@ fn verify_archive(
         let mut entry = match archive.by_index(idx) {
             Ok(e) => e,
             Err(e) => {
-                report.push(Finding::corrupt(
-                    "ZIP_BAD_ENTRY",
-                    format!("第 {} 个条目无法读取：{e}", idx + 1),
-                    None,
-                ));
+                // 加密条目：zip crate 在取条目时即因需密码而失败，加密本身不是损坏
+                let low = e.to_string().to_ascii_lowercase();
+                if low.contains("password") || low.contains("decrypt") || low.contains("encrypt") {
+                    report.push(Finding::ok(
+                        "ZIP_ENCRYPTED",
+                        format!("第 {} 个条目已加密，内容完整性未校验（不影响归档结构）", idx + 1),
+                    ));
+                } else {
+                    report.push(Finding::corrupt(
+                        "ZIP_BAD_ENTRY",
+                        format!("第 {} 个条目无法读取：{e}", idx + 1),
+                        None,
+                    ));
+                }
                 continue;
             }
         };
         let name = entry.name().to_string();
         let stored_crc = entry.crc32();
         let data_start = entry.data_start();
+
+        // 加密条目：无密码无法解压/校验内容，加密本身不是损坏。
+        if entry.encrypted() {
+            report.push(Finding::ok(
+                "ZIP_ENCRYPTED",
+                format!("条目 {name} 已加密，内容完整性未校验（不影响归档结构）"),
+            ));
+            continue;
+        }
 
         let mut hasher = crc32fast::Hasher::new();
         let mut buf = vec![0u8; 64 * 1024];

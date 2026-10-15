@@ -236,6 +236,29 @@ fn mp3_garbage_in_data_is_corrupt() {
     );
 }
 
+#[test]
+fn mp3_trailing_padding_is_not_corrupt() {
+    // 用户反馈：末尾几秒无内容（填充/标签）不应判为损坏
+    let path = copy_fixture("tone.mp3", "mp3-tail");
+    let mut data = fs::read(&path).unwrap();
+    data.extend_from_slice(&[0u8; 2048]); // 追加一段非帧尾部填充
+    fs::write(&path, &data).unwrap();
+
+    let r = verify_file(&path, &opts());
+    assert_ne!(
+        r.worst(),
+        Severity::Corrupt,
+        "末尾填充不应判为损坏：{:?}",
+        r.findings
+    );
+    let cs = codes(&r);
+    assert!(
+        cs.contains(&"MP3_TAIL_PADDING") || cs.contains(&"MP3_TAIL_DATA"),
+        "findings: {:?}",
+        r.findings
+    );
+}
+
 // ---------------------------------------------------------------------------
 // WAV / AVI（手工构造）
 // ---------------------------------------------------------------------------
@@ -595,6 +618,18 @@ fn flac_with_id3v2_prefix_is_not_mp3() {
             r.findings
         );
     }
+    // 不应因 ID3 前缀误报「缺少 fLaC 签名」（用户反馈的假损坏）
+    assert!(
+        !codes(&r).contains(&"FLAC_BAD_MAGIC"),
+        "带 ID3 前缀的 FLAC 不应报 FLAC_BAD_MAGIC：{:?}",
+        r.findings
+    );
+    assert_eq!(
+        r.worst(),
+        Severity::Ok,
+        "带 ID3 前缀的 FLAC 应整体判为正常：{:?}",
+        r.findings
+    );
 }
 
 #[test]

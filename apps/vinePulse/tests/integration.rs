@@ -205,6 +205,40 @@ fn zip_truncated_detected() {
 }
 
 #[test]
+fn zip_encrypted_entry_is_not_corrupt() {
+    // 用户反馈：加密压缩包无密码无法校验内容，加密本身不是损坏
+    let dir = temp_dir("zip-enc");
+    let path = make_zip(&dir, "enc.zip", b"secret payload for encryption test");
+
+    // 把本地头与中央目录里的加密标志位（通用标志 bit0）置 1，
+    // 模拟加密条目（无需真正加密内容，读取前就会被跳过）。
+    let mut data = fs::read(&path).unwrap();
+    let mut i = 0usize;
+    while i + 8 <= data.len() {
+        if &data[i..i + 4] == b"PK\x03\x04" {
+            data[i + 6] |= 0x01; // 本地头通用标志 bit0
+        } else if &data[i..i + 4] == b"PK\x01\x02" {
+            data[i + 8] |= 0x01; // 中央目录通用标志 bit0
+        }
+        i += 1;
+    }
+    fs::write(&path, &data).unwrap();
+
+    let r = verify_file(&path, &opts());
+    assert_ne!(
+        r.worst(),
+        Severity::Corrupt,
+        "加密条目不应判为损坏：{:?}",
+        r.findings
+    );
+    assert!(
+        codes(&r).contains(&"ZIP_ENCRYPTED"),
+        "findings: {:?}",
+        r.findings
+    );
+}
+
+#[test]
 fn empty_file_is_warning() {
     let dir = temp_dir("empty");
     let path = dir.join("empty.txt");
