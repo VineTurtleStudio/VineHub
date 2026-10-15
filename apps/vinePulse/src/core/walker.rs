@@ -8,8 +8,9 @@ use super::{Opts, Report};
 
 /// 收集待扫描文件（递归展开目录，跳过符号链接以避免循环）
 ///
-/// 返回 (文件列表, 错误描述列表)
-pub fn collect_files(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
+/// 返回 (文件列表, 错误描述列表)。文件项附带遍历时已得到的大小，
+/// 后续扫描无需再 stat 一次。
+pub fn collect_files(paths: &[PathBuf]) -> (Vec<(PathBuf, u64)>, Vec<String>) {
     let mut files = Vec::new();
     let mut errors = Vec::new();
     let mut queue: VecDeque<PathBuf> = paths.iter().cloned().collect();
@@ -27,7 +28,7 @@ pub fn collect_files(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
             continue;
         }
         if ft.is_file() {
-            files.push(path);
+            files.push((path, meta.len()));
         } else if ft.is_dir() {
             match std::fs::read_dir(&path) {
                 Ok(rd) => {
@@ -44,10 +45,15 @@ pub fn collect_files(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
 
 /// 并行扫描一批文件。
 ///
-/// `progress(done, total)` 在每个文件完成后调用；`cancel` 置真后停止派发新任务。
-pub fn scan<F>(files: &[PathBuf], opts: &Opts, cancel: &AtomicBool, progress: F) -> Vec<Report>
+/// `progress(done, total, report)` 在每个文件完成后调用；`cancel` 置真后停止派发新任务。
+pub fn scan<F>(
+    files: &[(PathBuf, u64)],
+    opts: &Opts,
+    cancel: &AtomicBool,
+    progress: F,
+) -> Vec<Report>
 where
-    F: Fn(usize, usize) + Sync,
+    F: Fn(usize, usize, &Report) + Sync,
 {
     let total = files.len();
     if total == 0 {
@@ -72,9 +78,11 @@ where
                     if i >= total || cancel.load(Ordering::Relaxed) {
                         break;
                     }
-                    let report = dispatch::verify_file(&files[i], opts);
+                    let (path, size) = &files[i];
+                    let mut report = dispatch::verify_file(path, opts);
+                    report.size = *size;
                     let d = done.fetch_add(1, Ordering::SeqCst) + 1;
-                    progress(d, total);
+                    progress(d, total, &report);
                     results.lock().expect("results lock").push(report);
                 }
             });

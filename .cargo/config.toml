@@ -1,12 +1,7 @@
-# 本机 MSVC 链接配置（免去每次手动执行 vcvars64.bat）
-# 注意：路径含 MSVC 版本号，升级 VS Build Tools 后需同步更新
-[target.x86_64-pc-windows-msvc]
-linker = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe"
-rustflags = [
-    "-Lnative=C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\lib\\x64",
-    "-Lnative=C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64",
-    "-Lnative=C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\ucrt\\x64",
-]
+# MSVC 链接配置：不再硬编码 link.exe 与 -Lnative 路径。
+# rustup 的 MSVC 工具链会通过 vswhere/注册表自动探测 VS Build Tools 与 Windows SDK，
+# 无需每次手动执行 vcvars64.bat，升级 VS Build Tools 后也无需同步版本号
+# （原硬编码 14.44.35207/10.0.26100.0 在 2026-10-14 重装环境时已验证可由自动探测替代）。
 
 # 测试并发数：默认 16 线程（≥ CPU 核数）同时创建/删除临时文件会触发
 # Defender 实时扫描风暴，全套测试从 ~1s 恶化到 ~60s；钉到 4 线程后稳定 ~1s

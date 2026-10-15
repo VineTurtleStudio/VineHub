@@ -1,7 +1,7 @@
 pub mod archive;
+pub mod data;
+pub mod doc;
 pub mod generic;
 pub mod image;
-
-// [M2] pub mod data;
-// [M2] pub mod doc;
-// [M2] pub mod media;
+pub mod media;
+pub mod tools;

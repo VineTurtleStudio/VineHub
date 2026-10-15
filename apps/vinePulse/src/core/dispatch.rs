@@ -1,7 +1,14 @@
 use std::path::Path;
 
 use super::{FileHint, Finding, Mode, Opts, Report, Severity, Verifier};
-use crate::verifiers::{archive::ZipVerifier, generic, image::JpegVerifier, image::PngVerifier};
+use crate::verifiers::{
+    archive::{GzipVerifier, RarVerifier, SevenZVerifier, TarVerifier, ZipVerifier},
+    data::{CsvVerifier, ParquetVerifier, SqliteVerifier},
+    doc::{DocContainerVerifier, PdfVerifier, RtfVerifier, TextDocVerifier},
+    generic,
+    image::{BmpVerifier, GifVerifier, JpegVerifier, PngVerifier, TiffVerifier, WebpVerifier},
+    media::MediaVerifier,
+};
 
 /// 魔数识别出的文件类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +18,7 @@ pub enum MagicKind {
     Gif,
     Bmp,
     Webp,
+    Tif,
     Wav,
     Avi,
     Gzip,
@@ -24,6 +32,10 @@ pub enum MagicKind {
     Ogg,
     Mp3,
     Mp4,
+    Mkv,
+    Webm,
+    Flv,
+    Ts,
     Sqlite,
     Parquet,
     Elf,
@@ -38,6 +50,7 @@ impl MagicKind {
             MagicKind::Gif => "GIF",
             MagicKind::Bmp => "BMP",
             MagicKind::Webp => "WebP",
+            MagicKind::Tif => "TIFF",
             MagicKind::Wav => "WAV",
             MagicKind::Avi => "AVI",
             MagicKind::Gzip => "gzip",
@@ -51,6 +64,10 @@ impl MagicKind {
             MagicKind::Ogg => "OGG",
             MagicKind::Mp3 => "MP3",
             MagicKind::Mp4 => "MP4",
+            MagicKind::Mkv => "Matroska",
+            MagicKind::Webm => "WebM",
+            MagicKind::Flv => "FLV",
+            MagicKind::Ts => "MPEG-TS",
             MagicKind::Sqlite => "SQLite",
             MagicKind::Parquet => "Parquet",
             MagicKind::Elf => "ELF",
@@ -73,6 +90,13 @@ pub fn detect_magic(head: &[u8]) -> Option<MagicKind> {
     }
     if starts(head, b"GIF87a") || starts(head, b"GIF89a") {
         return Some(MagicKind::Gif);
+    }
+    if starts(head, b"II\x2a\x00")
+        || starts(head, b"MM\x00\x2a")
+        || starts(head, b"II\x2b\x00")
+        || starts(head, b"MM\x00\x2b")
+    {
+        return Some(MagicKind::Tif);
     }
     if starts(head, b"%PDF-") {
         return Some(MagicKind::Pdf);
@@ -113,10 +137,16 @@ pub fn detect_magic(head: &[u8]) -> Option<MagicKind> {
     if starts(head, b"BM") && head.len() >= 14 {
         return Some(MagicKind::Bmp);
     }
-    if starts(head, b"ID3") {
-        return Some(MagicKind::Mp3);
+    // UTF-16 BOM（FF FE / FE FF）与 MPEG 帧同步字节冲突，优先按文本处理
+    if starts(head, &[0xFF, 0xFE]) || starts(head, &[0xFE, 0xFF]) {
+        return None;
     }
-    if starts(head, &[0xFF, 0xE0, 0xFF]) || starts(head, &[0xFF, 0xFB]) {
+    if starts(head, b"ID3") {
+        // ID3v2 标签前缀：真实媒体签名在其后。常见于抓轨/下载站给 FLAC 贴标签，
+        // 若直接判为 MP3 会把 FLAC 送进 MP3 验证器 → 假损坏（MP3_NO_FRAME）。
+        return id3_payload_magic(head).or(Some(MagicKind::Mp3));
+    }
+    if is_mp3_sync(head) {
         return Some(MagicKind::Mp3);
     }
     if starts(head, b"RIFF") && head.len() >= 12 {
@@ -135,10 +165,120 @@ pub fn detect_magic(head: &[u8]) -> Option<MagicKind> {
     {
         return Some(MagicKind::Mp4);
     }
+    if starts(head, &[0x1A, 0x45, 0xDF, 0xA3]) {
+        // EBML：按 DocType 区分 Matroska / WebM
+        let webm = head.windows(4).any(|w| w == b"webm");
+        return Some(if webm {
+            MagicKind::Webm
+        } else {
+            MagicKind::Mkv
+        });
+    }
+    if head.len() >= 9 && &head[0..3] == b"FLV" && head[3] == 1 {
+        return Some(MagicKind::Flv);
+    }
+    if head.len() > 376 {
+        // 至少三处同步字节，避免误判普通二进制/文本文件
+        let std_ts = head[0] == 0x47 && head[188] == 0x47 && head[376] == 0x47;
+        let m2ts = head[4] == 0x47 && head[192] == 0x47 && head[380] == 0x47;
+        let fec_ts = head[0] == 0x47 && head[204] == 0x47;
+        if std_ts || m2ts || fec_ts {
+            return Some(MagicKind::Ts);
+        }
+    }
     if head.len() >= 262 && &head[257..262] == b"ustar" {
         return Some(MagicKind::Tar);
     }
     None
+}
+
+/// 判断字节流是否以合法 MPEG 音频帧同步字开头（完整校验，非仅 0xFF 0xEx）。
+///
+/// 校验位率/采样率索引是否为保留值——否则 ID3 标签内的 0xFF 0xFB 之类
+/// 看似同步的字节会被误判成 MP3，抢在 fLaC 之前命中。
+fn is_mp3_sync(b: &[u8]) -> bool {
+    b.len() >= 4
+        && b[0] == 0xFF
+        && (b[1] & 0xE0) == 0xE0 // MPEG 同步
+        && (b[1] & 0x06) != 0    // 层不是保留值
+        && ((b[1] >> 3) & 0x03) != 1 // 版本不是保留值
+        && (b[2] & 0xF0) != 0
+        && (b[2] & 0xF0) != 0xF0 // 位率/采样率索引合法
+        && (b[2] & 0x0C) != 0x0C
+}
+
+/// 跳过 ID3v2 标签后识别真实媒体签名（FLAC/Ogg/MP3 帧同步等）。
+///
+/// ID3v2 头 10 字节：`ID3` + 版本(2) + 标志(1) + synchsafe 长度(4)。
+/// 总标签大小 = 10 + 长度；标志位 0x10 表示尾部还有 10 字节 footer。
+/// 长度不可信/被截断时，回落到有界线性扫描（只找音频类签名，避免误命中其它魔数）。
+fn id3_payload_magic(head: &[u8]) -> Option<MagicKind> {
+    let mut start = id3_tag_len(head).unwrap_or(3); // 头损坏时从 ID3 之后线性扫
+    if start >= head.len() {
+        return None;
+    }
+    // 有界扫描：标签后通常紧跟签名，扫到 64 KiB（FileHint 只取前 512B，实际远小于）
+    let end = head.len().min(start.saturating_add(65536));
+    while start + 4 <= end {
+        let w = &head[start..];
+        if w.starts_with(b"fLaC") {
+            return Some(MagicKind::Flac);
+        }
+        if w.starts_with(b"OggS") {
+            return Some(MagicKind::Ogg);
+        }
+        if w.starts_with(b"ID3") {
+            // 嵌套/连续标签：继续往后
+            start += 3;
+            continue;
+        }
+        // MP3 帧同步：与 detect_magic 主分支同样的完整校验（同步位/层/版本/位率/采样率）。
+        // 只认 0xFF 0xFB 之类前缀会把 ID3 标签字节误判成 MP3，抢在 fLaC 之前返回。
+        if is_mp3_sync(w) {
+            return Some(MagicKind::Mp3);
+        }
+        if w.starts_with(b"RIFF") && w.len() >= 12 {
+            return match &w[8..12] {
+                b"WEBP" => Some(MagicKind::Webp),
+                b"WAVE" => Some(MagicKind::Wav),
+                b"AVI " => Some(MagicKind::Avi),
+                _ => None,
+            };
+        }
+        if w.len() >= 12
+            && matches!(&w[4..8], b"ftyp" | b"moov" | b"mdat" | b"free" | b"skip" | b"wide")
+        {
+            return Some(MagicKind::Mp4);
+        }
+        if w.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+            return Some(if head.windows(4).any(|x| x == b"webm") {
+                MagicKind::Webm
+            } else {
+                MagicKind::Mkv
+            });
+        }
+        start += 1;
+    }
+    None
+}
+
+/// 解析 ID3v2 标签总长度（含 10 字节头 + footer），失败返回 None。
+/// 供 `FileHint::probe` 判断是否需扩大头部读取窗口。
+pub fn id3_tag_len(head: &[u8]) -> Option<usize> {
+    if head.len() < 10 || !head.starts_with(b"ID3") {
+        return None;
+    }
+    // synchsafe：每字节低 7 位有效
+    let b6 = head[6] as u32;
+    let b7 = head[7] as u32;
+    let b8 = head[8] as u32;
+    let b9 = head[9] as u32;
+    if b6 > 0x7F || b7 > 0x7F || b8 > 0x7F || b9 > 0x7F {
+        return None; // 非法 synchsafe，长度不可信
+    }
+    let size = (b6 << 21) | (b7 << 14) | (b8 << 7) | b9;
+    let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
+    Some((10 + size + footer) as usize)
 }
 
 /// 扩展名 → 期望的魔数类型
@@ -149,18 +289,23 @@ pub fn expected_by_ext(ext: &str) -> Option<MagicKind> {
         "gif" => MagicKind::Gif,
         "bmp" | "dib" => MagicKind::Bmp,
         "webp" => MagicKind::Webp,
+        "tif" | "tiff" => MagicKind::Tif,
         "wav" | "wave" => MagicKind::Wav,
         "avi" => MagicKind::Avi,
-        "gz" | "gzip" => MagicKind::Gzip,
+        "gz" | "gzip" | "tgz" => MagicKind::Gzip,
         "zip" | "jar" | "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" | "epub" => MagicKind::Zip,
         "7z" => MagicKind::SevenZ,
-        "rar" => MagicKind::Rar,
+        "rar" | "cbr" => MagicKind::Rar,
+        "tar" => MagicKind::Tar,
         "pdf" => MagicKind::Pdf,
         "rtf" => MagicKind::Rtf,
         "flac" => MagicKind::Flac,
         "ogg" | "oga" | "ogv" => MagicKind::Ogg,
         "mp3" => MagicKind::Mp3,
-        "mp4" | "m4a" | "m4v" | "mov" | "3gp" => MagicKind::Mp4,
+        "mp4" | "m4a" | "m4v" | "mov" | "3gp" | "3g2" | "mp4v" => MagicKind::Mp4,
+        "mkv" | "mka" | "mks" => MagicKind::Mkv,
+        "webm" => MagicKind::Webm,
+        "flv" | "f4v" => MagicKind::Flv,
         "sqlite" | "db" | "db3" => MagicKind::Sqlite,
         "parquet" => MagicKind::Parquet,
         _ => return None,
@@ -171,7 +316,24 @@ fn registry() -> Vec<Box<dyn Verifier>> {
     vec![
         Box::new(PngVerifier),
         Box::new(JpegVerifier),
+        Box::new(GifVerifier),
+        Box::new(BmpVerifier),
+        Box::new(WebpVerifier),
+        Box::new(TiffVerifier),
+        // docx/xlsx/... 先做容器内容检查，ZIP 验证器再做 CRC
+        Box::new(DocContainerVerifier),
         Box::new(ZipVerifier),
+        Box::new(GzipVerifier),
+        Box::new(TarVerifier),
+        Box::new(SevenZVerifier),
+        Box::new(RarVerifier),
+        Box::new(PdfVerifier),
+        Box::new(RtfVerifier),
+        Box::new(SqliteVerifier),
+        Box::new(CsvVerifier),
+        Box::new(ParquetVerifier),
+        Box::new(TextDocVerifier),
+        Box::new(MediaVerifier),
     ]
 }
 
@@ -199,9 +361,9 @@ pub fn verify_file(path: &Path, opts: &Opts) -> Report {
     // 1. 通用检查总是执行
     report.extend(generic::verify(path, &hint, opts).findings);
 
-    // 2. 按魔数（其次扩展名）选择格式验证器
+    // 2. 按魔数（其次扩展名）选择格式验证器；可叠加（如 docx 同时做容器与 ZIP 检查）
     let reg = registry();
-    if let Some(v) = reg.iter().find(|v| v.supports(&hint)) {
+    for v in reg.iter().filter(|v| v.supports(&hint)) {
         let sub = v.verify(path, opts);
         if hint.magic.is_none() && report.file_type == "unknown" {
             report.file_type = format!("{}（按扩展名推断）", sub.file_type);

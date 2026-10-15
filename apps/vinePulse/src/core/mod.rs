@@ -115,6 +115,8 @@ pub enum Mode {
 pub struct Report {
     pub path: PathBuf,
     pub file_type: String,
+    /// 文件大小（字节）。由目录遍历阶段的 metadata 得到，避免扫描中重复 stat。
+    pub size: u64,
     pub mode: Mode,
     pub findings: Vec<Finding>,
     #[serde(serialize_with = "ser_duration_ms")]
@@ -130,6 +132,7 @@ impl Report {
         Self {
             path,
             file_type: file_type.into(),
+            size: 0,
             mode,
             findings: Vec::new(),
             duration: Duration::ZERO,
@@ -161,6 +164,17 @@ impl Report {
 
     pub fn is_ok(&self) -> bool {
         self.worst() == Severity::Ok
+    }
+
+    /// 「首因」：严重度最高的问题，供结果表徽章与悬停摘要使用。
+    ///
+    /// 返回的不是 Ok 级提示（那类信息价值低，留给详情面板）；无问题返回 None。
+    /// 同级多个时取最靠前的一个，行为稳定可预测。
+    pub fn primary_finding(&self) -> Option<&Finding> {
+        self.findings
+            .iter()
+            .filter(|f| f.severity.is_problem())
+            .max_by_key(|f| f.severity)
     }
 }
 
@@ -216,9 +230,21 @@ impl FileHint {
         use std::io::Read;
 
         let meta = std::fs::metadata(path)?;
-        let mut head = Vec::with_capacity(512);
         let mut file = std::fs::File::open(path)?;
+        // ID3v2 标签可能远超默认窗口（实测有 4 KiB+ 的），真实媒体签名（fLaC 等）在标签之后。
+        // 先读 512B 探测到 ID3 头，再按其声明长度把窗口扩到签名之后，避免带标签的 FLAC 被误判为 MP3。
+        let mut head = Vec::with_capacity(512);
         let _ = (&mut file).take(512).read_to_end(&mut head)?;
+        if head.starts_with(b"ID3")
+            && let Some(tag_end) = dispatch::id3_tag_len(&head)
+            && tag_end > head.len()
+        {
+            // 上限 1 MiB：再大的标签也只在头 1 MiB 内找签名
+            let want = tag_end.saturating_add(64).min(1024 * 1024);
+            let _ = (&mut file)
+                .take((want - head.len()) as u64)
+                .read_to_end(&mut head)?;
+        }
         let ext = path
             .extension()
             .and_then(|e| e.to_str())

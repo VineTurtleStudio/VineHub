@@ -12,13 +12,15 @@ const HELP: &str = "\
 vine-pulse —— 给文件把脉，检测各类文件是否损坏
 
 用法:
-  vine-pulse [选项] <文件或目录>...
+  vine-pulse                            启动图形界面（无参数时）
+  vine-pulse [选项] <文件或目录>...     命令行模式
 
 选项:
   -m, --manifest <文件>        哈希清单模式（.sha256 / .md5 / .sfv），
                                以清单中的文件为扫描目标并比对哈希
   -j, --json <输出文件>        导出 JSON 报告
   -d, --deep                   强制深度解码（超过大小阈值的文件也解码）
+      --max-deep-size <MB>     深度解码大小阈值（默认 64；小于等于该值总是深度解码）
   -q, --quiet                  仅输出有问题的文件
       --entropy-threshold <f>  低熵判定阈值（0~8，默认 0.5）
       --no-color               关闭彩色输出
@@ -33,6 +35,7 @@ struct Args {
     manifest: Option<PathBuf>,
     json: Option<PathBuf>,
     deep: bool,
+    max_deep_size_mb: Option<u64>,
     quiet: bool,
     no_color: bool,
     entropy_threshold: Option<f64>,
@@ -45,6 +48,7 @@ fn parse_args() -> Result<Args, String> {
         manifest: None,
         json: None,
         deep: false,
+        max_deep_size_mb: None,
         quiet: false,
         no_color: false,
         entropy_threshold: None,
@@ -56,6 +60,13 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "-h" | "--help" => args.help = true,
             "-d" | "--deep" => args.deep = true,
+            "--max-deep-size" => {
+                let v = it.next().ok_or("缺少 --max-deep-size 的参数值")?;
+                let mb: u64 = v
+                    .parse()
+                    .map_err(|_| format!("无效的大小阈值：{v}（应为 MB 整数）"))?;
+                args.max_deep_size_mb = Some(mb);
+            }
             "-q" | "--quiet" => args.quiet = true,
             "--no-color" => args.no_color = true,
             "-m" | "--manifest" => {
@@ -112,6 +123,17 @@ fn main() -> ExitCode {
         return vine_pulse::rpc::run();
     }
 
+    // M3：无参数启动图形界面（带参数走现有 CLI，行为零回归）
+    if std::env::args().len() == 1 {
+        return match vine_pulse::ui::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("启动界面失败：{e}");
+                ExitCode::from(3)
+            }
+        };
+    }
+
     #[cfg(windows)]
     enable_utf8_console();
 
@@ -134,6 +156,9 @@ fn main() -> ExitCode {
         deep: args.deep,
         ..Default::default()
     };
+    if let Some(mb) = args.max_deep_size_mb {
+        opts.max_deep_size = mb.saturating_mul(1024 * 1024);
+    }
     if let Some(t) = args.entropy_threshold {
         opts.entropy_threshold = t;
     }
@@ -151,7 +176,13 @@ fn main() -> ExitCode {
             if !args.paths.is_empty() {
                 eprintln!("提示：指定 --manifest 时以清单中的文件为扫描目标，位置参数已忽略");
             }
-            let files: Vec<PathBuf> = entries.iter().map(|e| e.path.clone()).collect();
+            let files: Vec<(PathBuf, u64)> = entries
+                .iter()
+                .map(|e| {
+                    let size = std::fs::metadata(&e.path).map(|m| m.len()).unwrap_or(0);
+                    (e.path.clone(), size)
+                })
+                .collect();
             let index = hash::index_manifest(&entries);
             opts.sidecar_hash = false;
             (files, Some(Arc::new(index)))
@@ -181,7 +212,7 @@ fn main() -> ExitCode {
     let cancel = AtomicBool::new(false);
     let show_progress = std::io::stderr().is_terminal();
 
-    let reports = walker::scan(&files, &opts, &cancel, |done, total| {
+    let reports = walker::scan(&files, &opts, &cancel, |done, total, _report| {
         if show_progress {
             eprint!("\r\x1b[K扫描中 {done}/{total}");
             let _ = std::io::stderr().flush();

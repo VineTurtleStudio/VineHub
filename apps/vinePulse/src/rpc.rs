@@ -191,12 +191,12 @@ fn handle_scan_start(
     for e in &errors {
         eprintln!("[vine-pulse] 收集文件警告: {e}");
     }
-    let files: Vec<PathBuf> = if types.is_empty() {
+    let files: Vec<(PathBuf, u64)> = if types.is_empty() {
         files
     } else {
         files
             .into_iter()
-            .filter(|p| {
+            .filter(|(p, _)| {
                 p.extension()
                     .map(|e| types.contains(&e.to_string_lossy().to_ascii_lowercase()))
                     .unwrap_or(false)
@@ -223,12 +223,14 @@ fn handle_scan_start(
     let state = state.clone();
     let terminal_id = id;
     std::thread::spawn(move || {
-        let mut opts = Opts::default();
-        opts.deep = deep;
+        let opts = Opts {
+            deep,
+            ..Default::default()
+        };
         let start = std::time::Instant::now();
         let total = files.len();
         let task_for_progress = task_id.clone();
-        let reports = walker::scan(&files, &opts, &cancel, |done, t| {
+        let reports = walker::scan(&files, &opts, &cancel, |done, t, _report| {
             state.send_notification(
                 method::TASK_PROGRESS,
                 TaskProgressParams {

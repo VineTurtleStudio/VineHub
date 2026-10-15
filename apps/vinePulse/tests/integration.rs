@@ -349,7 +349,7 @@ fn walker_collects_and_scans() {
     assert_eq!(files.len(), 4, "files: {files:?}");
 
     let cancel = AtomicBool::new(false);
-    let reports = walker::scan(&files, &opts(), &cancel, |_, _| {});
+    let reports = walker::scan(&files, &opts(), &cancel, |_, _, _| {});
     assert_eq!(reports.len(), 4);
     // 扫描结果按路径排序
     let mut sorted = reports.clone();

@@ -72,7 +72,7 @@ impl Client {
         while std::time::Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             let Some(msg) = self.recv(remaining) else { break };
-            if msg["id"] == Value::from(id) && msg.get("method").is_none() {
+            if msg["id"] == id && msg.get("method").is_none() {
                 return Some(msg);
             }
         }
@@ -177,7 +177,7 @@ fn scan_start_progress_and_terminal() {
             progress_seen += 1;
             continue;
         }
-        if msg["id"] == Value::from(1) {
+        if msg["id"] == 1 {
             break msg;
         }
     };
@@ -275,7 +275,7 @@ fn scan_cancel_yields_cancelled_terminal() {
     let terminal = loop {
         assert!(std::time::Instant::now() < deadline, "等待取消终态超时");
         let msg = client.recv(Duration::from_secs(15)).expect("连接不应断开");
-        if msg.get("method").is_none() && msg["id"] == Value::from(1) {
+        if msg.get("method").is_none() && msg["id"] == 1 {
             break msg;
         }
     };
