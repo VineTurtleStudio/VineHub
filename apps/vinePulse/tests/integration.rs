@@ -347,8 +347,9 @@ fn repeated_fill_is_skipped_when_magic_present() {
 }
 
 #[test]
-fn flac_too_large_is_ok_note_by_default() {
-    // 稀疏文件：513 MiB 几乎不占磁盘，只触发大小门（不读内容）
+fn flac_large_file_is_structurally_scanned_not_skipped() {
+    // 稀疏文件：513 MiB 几乎不占磁盘。新行为：不再跳过，改用流式滑动窗口做
+    // 逐帧结构遍历；零内容不是 fLaC → 流式扫描在偏移 0 报 FLAC_BAD_MAGIC（损坏）。
     let dir = temp_dir("flac-huge");
     let path = dir.join("huge.flac");
     let f = File::create(&path).unwrap();
@@ -356,21 +357,24 @@ fn flac_too_large_is_ok_note_by_default() {
     drop(f);
 
     let r = verify_file(&path, &opts());
-    let hit = r
-        .findings
-        .iter()
-        .find(|f| f.code == "FLAC_TOO_LARGE")
-        .expect("应有 FLAC_TOO_LARGE 提示");
-    assert_eq!(
-        hit.severity,
-        Severity::Ok,
-        "未执行的检查应为 Ok 级说明而非未知：{:?}",
-        hit
+    let cs = codes(&r);
+    assert!(
+        !cs.contains(&"FLAC_TOO_LARGE"),
+        "大文件不应再被跳过：{:?}",
+        r.findings
     );
+    assert!(
+        cs.contains(&"FLAC_BAD_MAGIC"),
+        "流式结构扫描应识别出非 fLaC 头：{:?}",
+        r.findings
+    );
+    assert_eq!(r.worst(), Severity::Corrupt, "findings: {:?}", r.findings);
 }
 
 #[test]
-fn flac_too_large_forced_deep_goes_streaming_md5() {
+fn flac_large_file_deep_still_runs_structural_scan_first() {
+    // 深度解码不跳过结构层：稀疏零文件先被流式结构扫描判为 FLAC_BAD_MAGIC，
+    // 结构层已损坏则不再做 MD5（不会出现 FLAC_NO_MD5）。
     let dir = temp_dir("flac-huge-deep");
     let path = dir.join("huge.flac");
     let f = File::create(&path).unwrap();
@@ -383,13 +387,19 @@ fn flac_too_large_forced_deep_goes_streaming_md5() {
     let cs = codes(&r);
     assert!(
         !cs.contains(&"FLAC_TOO_LARGE"),
-        "强制深度解码时不应再跳过：{:?}",
+        "强制深度解码时更不应跳过：{:?}",
         r.findings
     );
-    // 稀疏零内容不是 fLaC：头部解析失败 → stored None → FLAC_NO_MD5（Ok 级）
-    assert!(cs.contains(&"FLAC_NO_MD5"), "findings: {:?}", r.findings);
-    let hit = r.findings.iter().find(|f| f.code == "FLAC_NO_MD5").unwrap();
-    assert_eq!(hit.severity, Severity::Ok, "{:?}", hit);
+    assert!(
+        cs.contains(&"FLAC_BAD_MAGIC"),
+        "结构扫描应先于 MD5 执行：{:?}",
+        r.findings
+    );
+    assert!(
+        !cs.contains(&"FLAC_NO_MD5"),
+        "结构层已损坏则不应再做 MD5：{:?}",
+        r.findings
+    );
 }
 
 #[test]

@@ -1693,27 +1693,50 @@ fn find_flac_frame_end(d: &[u8], start: usize, hlen: usize) -> Option<usize> {
     None
 }
 
-/// 结构遍历的大小上限（整读进内存做逐帧 CRC 检查，超过则不整读）；
-/// 超过的文件在勾选「强制深度解码」时改走流式全量 MD5（不占内存）。
+/// 流式帧尾搜索：与 `find_flac_frame_end` 相同，但 `next == d.len()`（帧尾恰好落在
+/// 窗口右边界）只在 `at_eof`（窗口已覆盖到文件末尾）时才接受，避免大文件流式遍历
+/// 在窗口边界误判帧尾。
+fn find_flac_frame_end_stream(
+    d: &[u8],
+    start: usize,
+    hlen: usize,
+    at_eof: bool,
+) -> Option<usize> {
+    let mut crc = 0u16;
+    let mut e = start + 1;
+    while e + 2 <= d.len() {
+        crc = crc16_update(crc, d[e - 1]);
+        if e >= start + hlen && crc == u16::from_be_bytes([d[e], d[e + 1]]) {
+            let next = e + 2;
+            let ok = if next == d.len() {
+                at_eof
+            } else {
+                flac_frame_header_len(d, next).is_some() || is_tag_tail(d, next)
+            };
+            if ok {
+                return Some(next);
+            }
+        }
+        e += 1;
+    }
+    None
+}
+
+/// 结构遍历的大小上限（整读进内存做逐帧 CRC 检查，超过则改用流式滑动窗口遍历，
+/// 内存有界于窗口大小，从而大文件也能做逐帧 CRC 校验——消灭「大文件跳过结构校验」）。
 const FLAC_STRUCTURAL_LIMIT: u64 = 512 * 1024 * 1024;
+
+/// 流式帧遍历的滑动窗口大小。需覆盖单帧最大理论尺寸
+/// （blocksize 65535 × 声道 8 × 每样本 4B ≈ 2 MiB）并留足帧间空隙扫描余量。
+const FLAC_STREAM_WINDOW: usize = 8 * 1024 * 1024;
 
 fn verify_flac(path: &Path, size: u64, opts: &Opts, report: &mut Report) {
     if size > FLAC_STRUCTURAL_LIMIT {
-        if opts.deep {
-            // 强制深度解码：GB 级整轨不适合整读进内存做结构遍历，但流式全量
-            // 解码 MD5 是金标准且内存恒定——只读头部拿 STREAMINFO 期望值即可。
-            let stored = read_head_streaminfo_md5(path);
+        // 大文件不整读进内存，改用流式滑动窗口做逐帧 CRC 结构遍历（内存有界），
+        // 与小文件路径产出一致的损坏判定；结构通过后再按需做流式全量 MD5。
+        let stored = verify_flac_streaming(path, size, report);
+        if !has_corrupt(report) {
             verify_flac_md5(path, size, opts, stored, report);
-        } else {
-            // 未执行不等于有问题（对齐 BATON「未启用的检查不算问题」）：
-            // 降为 Ok 级说明，详情仍可见；勾选「强制深度解码」可做全量 MD5。
-            report.push(Finding::ok(
-                "FLAC_TOO_LARGE",
-                format!(
-                    "文件 {size} 字节超过 {} MiB，跳过结构遍历与 MD5 校验（可在设置勾选「强制深度解码」做全量 MD5）",
-                    FLAC_STRUCTURAL_LIMIT / (1024 * 1024)
-                ),
-            ));
         }
         return;
     }
@@ -1885,18 +1908,294 @@ fn verify_flac(path: &Path, size: u64, opts: &Opts, report: &mut Report) {
     }
 }
 
+/// 大文件（> `FLAC_STRUCTURAL_LIMIT`）的流式结构遍历：不整读进内存，用滑动窗口逐帧
+/// 做 CRC8/CRC16 校验，内存有界于 `FLAC_STREAM_WINDOW`。与小文件整读路径产出一致的
+/// 损坏判定（帧头 CRC8、帧尾 CRC16、帧间空隙），返回 STREAMINFO 里的音频 MD5
+/// （供调用方随后做流式全量 MD5 比对）。
+fn verify_flac_streaming(path: &Path, size: u64, report: &mut Report) -> Option<[u8; 16]> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            io_error(report, e);
+            return None;
+        }
+    };
+    let mut r = BufReader::with_capacity(1024 * 1024, file);
+
+    // --- fLaC 签名（可带 ID3v2 前缀）---
+    let mut base: u64 = 0;
+    let mut four = [0u8; 4];
+    if read_fill(&mut r, &mut four) < 4 {
+        report.push(Finding::corrupt(
+            "FLAC_TRUNCATED",
+            "文件太短，缺少 fLaC 签名",
+            Some(0),
+        ));
+        return None;
+    }
+    if &four[..3] == b"ID3" {
+        let mut rest = [0u8; 6];
+        if read_fill(&mut r, &mut rest) < 6 {
+            report.push(Finding::corrupt("FLAC_TRUNCATED", "ID3 头不完整", Some(0)));
+            return None;
+        }
+        let mut id3h = [0u8; 10];
+        id3h[..4].copy_from_slice(&four);
+        id3h[4..].copy_from_slice(&rest);
+        let Some(tag_end) = crate::core::dispatch::id3_tag_len(&id3h) else {
+            // 与整读路径一致：非法 ID3 头 → base=0 → 在偏移 0 处报缺 fLaC
+            report.push(Finding::corrupt(
+                "FLAC_BAD_MAGIC",
+                "缺少 fLaC 签名，文件头已损坏",
+                Some(0),
+            ));
+            return None;
+        };
+        if r.seek(SeekFrom::Start(tag_end as u64)).is_err() {
+            report.push(Finding::corrupt(
+                "FLAC_TRUNCATED",
+                "ID3 标签后无数据（文件截断）",
+                Some(tag_end as u64),
+            ));
+            return None;
+        }
+        base = tag_end as u64;
+        if read_fill(&mut r, &mut four) < 4 || &four != b"fLaC" {
+            report.push(Finding::corrupt(
+                "FLAC_BAD_MAGIC",
+                "缺少 fLaC 签名，文件头已损坏",
+                Some(base),
+            ));
+            return None;
+        }
+    } else if &four != b"fLaC" {
+        report.push(Finding::corrupt(
+            "FLAC_BAD_MAGIC",
+            "缺少 fLaC 签名，文件头已损坏",
+            Some(0),
+        ));
+        return None;
+    }
+    // --- 元数据块链（流式：STREAMINFO 直读，其余块 seek 跳过，不整读）---
+    let mut p = base + 4; // 逻辑位置：fLaC 之后即元数据块头
+    let mut last = false;
+    let mut blocks = 0u32;
+    let mut has_streaminfo = false;
+    let mut stored_md5: Option<[u8; 16]> = None;
+    while !last {
+        let mut hdr = [0u8; 4];
+        if read_fill(&mut r, &mut hdr) < 4 {
+            report.push(Finding::corrupt(
+                "FLAC_TRUNCATED",
+                format!("偏移 {p} 处元数据块头不完整（疑似截断）"),
+                Some(p),
+            ));
+            return None;
+        }
+        let flags = hdr[0];
+        last = flags & 0x80 != 0;
+        let btype = flags & 0x7F;
+        let len = (usize::from(hdr[1]) << 16) | (usize::from(hdr[2]) << 8) | usize::from(hdr[3]);
+        if p + 4 + len as u64 > size {
+            report.push(Finding::corrupt(
+                "FLAC_TRUNCATED",
+                format!("元数据块 {btype} 声明 {len} 字节，超出文件范围（疑似截断）"),
+                Some(p),
+            ));
+            return None;
+        }
+        if blocks == 0 && btype != 0 {
+            report.push(Finding::corrupt(
+                "FLAC_NO_STREAMINFO",
+                "第一个元数据块不是 STREAMINFO，文件头已损坏",
+                Some(p),
+            ));
+            return None;
+        }
+        if btype == 0 {
+            if len != 34 {
+                report.push(Finding::corrupt(
+                    "FLAC_BAD_STREAMINFO",
+                    format!("STREAMINFO 长度应为 34，实际 {len}"),
+                    Some(p),
+                ));
+                return None;
+            }
+            let mut si = [0u8; 34];
+            if read_fill(&mut r, &mut si) < 34 {
+                report.push(Finding::corrupt(
+                    "FLAC_TRUNCATED",
+                    format!("偏移 {p} 处 STREAMINFO 不完整（疑似截断）"),
+                    Some(p),
+                ));
+                return None;
+            }
+            has_streaminfo = true;
+            check_streaminfo(&si, report, p + 4);
+            stored_md5 = streaminfo_md5(&si);
+        } else {
+            // 非 STREAMINFO 块（可能数 MiB 的封面等）：seek 跳过
+            if r.seek(SeekFrom::Start(p + 4 + len as u64)).is_err() {
+                report.push(Finding::corrupt(
+                    "FLAC_TRUNCATED",
+                    format!("元数据块 {btype} 声明 {len} 字节，超出文件范围（疑似截断）"),
+                    Some(p),
+                ));
+                return None;
+            }
+        }
+        p += 4 + len as u64;
+        blocks += 1;
+        if blocks > 100_000 {
+            report.push(Finding::corrupt(
+                "FLAC_BAD_METADATA",
+                "元数据块数量异常（结构已损坏）",
+                Some(base + 4),
+            ));
+            return None;
+        }
+    }
+    if !has_streaminfo {
+        report.push(Finding::corrupt(
+            "FLAC_NO_STREAMINFO",
+            "缺少 STREAMINFO 块，无法读取音频流信息",
+            Some(base + 4),
+        ));
+        return None;
+    }
+    // --- 音频帧区：滑动窗口流式遍历 ---
+    if p >= size {
+        report.push(Finding::corrupt(
+            "FLAC_NO_FRAME",
+            "元数据之后没有任何音频帧（文件可能被截断）",
+            Some(size),
+        ));
+        return None;
+    }
+
+    // 不变量：`win[0]` 对应文件偏移 `win_base`；当前帧起始下标为 `rel`
+    // （`fpos = win_base + rel`）。helpers 作用于 `&win[rel..]`（帧头在下标 0）。
+    // 仅当已消费前缀 `rel` 超过半窗时才 memmove 压缩（摊还 O(1)），避免每帧
+    // drain 整个窗口带来的 O(窗口) 拷贝——那正是旧实现慢的根源。
+    let mut win: Vec<u8> = Vec::with_capacity(FLAC_STREAM_WINDOW + FLAC_STREAM_WINDOW / 2 + 65536);
+    let mut win_base = p;
+    let mut rel = 0usize;
+    {
+        let mut tmp = vec![0u8; FLAC_STREAM_WINDOW];
+        let n = read_fill(&mut r, &mut tmp);
+        win.extend_from_slice(&tmp[..n]);
+    }
+
+    let mut frames: u64 = 0;
+    loop {
+        let fpos = win_base + rel as u64;
+
+        // 压缩：已消费前缀超过半窗时把 win[rel..] 移到前面，释放前缀空间
+        if rel > FLAC_STREAM_WINDOW / 2 {
+            win.drain(..rel);
+            win_base = fpos;
+            rel = 0;
+        }
+        // 补齐：让从 rel 起有 FLAC_STREAM_WINDOW 字节（或读到 EOF）
+        let have = win.len() - rel;
+        if have < FLAC_STREAM_WINDOW && (win_base + win.len() as u64) < size {
+            let want = FLAC_STREAM_WINDOW - have;
+            let mut tmp = vec![0u8; want];
+            let n = read_fill(&mut r, &mut tmp);
+            win.extend_from_slice(&tmp[..n]);
+        }
+        let at_eof = (win_base + win.len() as u64) >= size;
+        let d = &win[rel..];
+
+        if d.len() < 6 {
+            if at_eof {
+                break; // 正常结束：末尾不足一个帧头
+            }
+            report.push(Finding::corrupt(
+                "FLAC_TRUNCATED",
+                format!("偏移 {fpos} 处数据不足以解析帧头（疑似截断）"),
+                Some(fpos),
+            ));
+            return None;
+        }
+
+        let Some(hlen) = flac_frame_header_len(d, 0) else {
+            match find_flac_header(d, 0) {
+                Some((i, _)) if i > 0 => {
+                    report.push(Finding::corrupt(
+                        "FLAC_FRAME_GAP",
+                        format!(
+                            "偏移 {fpos} 处有 {i} 字节无法解析（帧间存在垃圾数据），下一帧在 {}",
+                            fpos + i as u64
+                        ),
+                        Some(fpos),
+                    ));
+                }
+                _ => {
+                    report.push(Finding::corrupt(
+                        "FLAC_BAD_FRAME",
+                        format!("偏移 {fpos} 处无法解析出合法的音频帧头，文件可能被截断"),
+                        Some(fpos),
+                    ));
+                }
+            }
+            return None;
+        };
+
+        let Some(next_rel) = find_flac_frame_end_stream(d, 0, hlen, at_eof) else {
+            // 单帧最大约 2 MiB << 窗口 8 MiB，故窗口内无帧尾即 CRC16 校验失败（损坏）。
+            report.push(Finding::corrupt(
+                "FLAC_TRUNCATED",
+                format!("偏移 {fpos} 处的音频帧没有合法的帧尾（CRC16 校验失败，疑似截断）"),
+                Some(fpos),
+            ));
+            return None;
+        };
+
+        frames += 1;
+        if frames > 10_000_000 {
+            report.push(Finding::warning(
+                "FLAC_TOO_MANY_FRAMES",
+                "帧数超过 1000 万，提前结束遍历",
+                None,
+            ));
+            return stored_md5;
+        }
+        let next = fpos + next_rel as u64;
+        if next >= size {
+            break;
+        }
+        rel += next_rel;
+    }
+
+    if frames == 0 {
+        report.push(Finding::corrupt(
+            "FLAC_NO_FRAME",
+            "文件中没有完整的音频帧",
+            Some(p),
+        ));
+    }
+    stored_md5
+}
+
 /// FLAC 金标准校验：完整解码整段音频，算 PCM 的 MD5 并与 STREAMINFO 比对。
 ///
 /// 这是 FlacValidator / `flac -t` 使用的方法。结构层（CRC8/CRC16）只能证明
 /// "帧能被正确切分"，MD5 才能证明"解码出的音频一个样本都没变"。
 fn verify_flac_md5(path: &Path, size: u64, opts: &Opts, stored: Option<[u8; 16]>, report: &mut Report) {
     let Some(stored) = stored else {
-        // 未记录 MD5 是编码器/年代问题，不是文件损坏；结构校验已通过，故为 Ok 级提示。
-        report.push(Finding::ok(
-            "FLAC_NO_MD5",
-            "STREAMINFO 未记录音频 MD5（多为老 rip），无法做完整校验（结构校验已通过）",
-        ));
-        return;
+        // 未记录 MD5（全零，多为老 rip/抓轨）：没有期望值可比对，但**完整解码本身**
+        // 仍能发现解码级损坏（invalid residual / 帧CRC 失败 -> DecodeFailed）。
+        // 默认不强制解码（大文件批量扫描代价高），给 Ok 说明；勾选「强制深度解码」(-d)
+        // 则一定真解码——否则大文件（>512MiB 结构遍历也被跳过）会完全漏检音频损坏。
+        if !opts.deep {
+            report.push(Finding::ok(
+                "FLAC_NO_MD5",
+                "STREAMINFO 未记录音频 MD5（多为老 rip），无法做 MD5 比对（结构校验已通过；勾选「强制深度解码」可做全量解码）",
+            ));
+            return;
+        }
+        return verify_flac_decode_only(path, size, report);
     };
 
     // 不受深度解码大小阈值限制：结构校验已通过，完整 MD5 是金标准，对齐
@@ -1947,6 +2246,33 @@ fn verify_flac_md5(path: &Path, size: u64, opts: &Opts, stored: Option<[u8; 16]>
             ),
             None,
         ));
+    }
+}
+
+/// 无存储 MD5 时的深度解码：只求「能否完整解码」，不比对 MD5。
+/// 解码中途失败（invalid residual、帧 CRC 失败等）即音频损坏；成功则说明数据可完整还原。
+fn verify_flac_decode_only(path: &Path, size: u64, report: &mut Report) {
+    match decode_flac_md5(path, true) {
+        Ok(_) => report.push(Finding::ok(
+            "FLAC_DECODE_OK",
+            "完整解码通过（STREAMINFO 未记录 MD5，已按能否解码判定，数据可完整还原）",
+        )),
+        Err(FlacDecodeError::TooLarge) => report.push(Finding::ok(
+            "FLAC_MD5_TOO_LARGE",
+            format!(
+                "文件 {size} 字节超过硬上限 {} MiB，未做完整解码（结构校验已通过）",
+                FLAC_MD5_HARD_LIMIT / (1024 * 1024)
+            ),
+        )),
+        Err(FlacDecodeError::DecodeFailed) => report.push(Finding::corrupt(
+            "FLAC_MD5_DECODE_FAILED",
+            "FLAC 深度解码中途失败（音频帧损坏，如 invalid residual），无法完整还原音频",
+            None,
+        )),
+        Err(FlacDecodeError::Unavailable) => report.push(Finding::ok(
+            "FLAC_MD5_SKIPPED",
+            "FLAC 深度解码未执行（解码器不可用），未做完整校验（结构校验已通过）",
+        )),
     }
 }
 
@@ -2070,32 +2396,6 @@ fn streaminfo_md5(si: &[u8]) -> Option<[u8; 16]> {
         return None; // 未记录校验值
     }
     Some(md5)
-}
-
-/// 大文件强制深度解码时只读文件头取 STREAMINFO 的期望 MD5（避免为 16 字节
-/// 把 GB 级文件读进内存）。STREAMINFO 固定为第一个元数据块（type 0、长 34），
-/// 开头 42 字节内即可拿到。
-fn read_head_streaminfo_md5(path: &Path) -> Option<[u8; 16]> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-
-    let mut f = File::open(path).ok()?;
-    // 跳过 ID3v2 前缀（带标签的 FLAC fLaC 不在偏移 0）
-    let mut stream_start = 0u64;
-    let mut id3 = [0u8; 10];
-    if f.read_exact(&mut id3).is_ok() && &id3[0..3] == b"ID3" {
-        stream_start = crate::core::dispatch::id3_tag_len(&id3).unwrap_or(0) as u64;
-    }
-    f.seek(SeekFrom::Start(stream_start)).ok()?;
-    let mut buf = [0u8; 4 + 4 + 34];
-    f.read_exact(&mut buf).ok()?;
-    if &buf[0..4] != b"fLaC" || buf[4] & 0x7F != 0 {
-        return None;
-    }
-    let len = (usize::from(buf[5]) << 16) | (usize::from(buf[6]) << 8) | usize::from(buf[7]);
-    if len < 34 {
-        return None;
-    }
-    streaminfo_md5(&buf[8..])
 }
 
 fn check_streaminfo(si: &[u8], report: &mut Report, offset: u64) {
