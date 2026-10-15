@@ -2,6 +2,9 @@
 /target
 **/*.rs.bk
 
+# 扫描报告输出（运行时生成）
+/reports/
+
 # Node / 前端
 node_modules/
 dist/
