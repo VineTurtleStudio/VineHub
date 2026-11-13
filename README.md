@@ -31,6 +31,11 @@
 | 4 | **vineCurator** | 本地媒体资产管理（细节多） | P2 第三个 |
 | 5 | **VinePalmaCursor** | 鼠标光标编辑（细节多） | P2 最后 |
 
+**存量项目状态（2026-10-16）**：
+
+- **vineFerry**（复制/移动 + 哈希校验，曾附带资源管理器式文件管理 GUI）——**已封存**，移出 workspace members，不再编译；详见 `apps/vineFerry/ARCHIVED.md`。
+- **vineSeal**（藤印）——vineFerry 的后继：只做「转移即校验」的极简工具（CLI + 单窗口 GUI + sidecar 插件），已加入 workspace。
+
 ### 0.3 明确不纳入
 
 - **GrapeLeafi-QQbot**（及 share 副本）、**vine-sinitic-治世**（Godot 游戏）、**Android/VinePalma Player**——非文件类/平台不符，保持独立开发，不列入 hub。

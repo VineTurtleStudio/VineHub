@@ -283,6 +283,100 @@ fn state_get_filter_test_app_info_roundtrip() {
 }
 
 #[test]
+fn config_save_survives_stale_pair_paths() {
+    // 回归：换系统/换盘后旧文件夹对的源目录已不存在时，
+    // 旧记录不能把整份配置卡死（删不掉旧对、也建不了新对）。
+    let src = temp_dir("stale-src");
+    let dst = temp_dir("stale-dst");
+    let mut client = Client::spawn();
+
+    let pair = serde_json::json!({
+        "id": "p-stale",
+        "name": "旧备份",
+        "source": src.display().to_string(),
+        "dest": dst.display().to_string(),
+        "enabled": true,
+        "include": [],
+        "exclude": [],
+        "intervalMinutes": null
+    });
+    client.request(
+        40,
+        "config.save",
+        Some(serde_json::json!({ "config": { "copyThreads": 4, "pairs": [pair] } })),
+    );
+    let resp = client.recv_response_for(40, Duration::from_secs(10)).expect("首次保存应成功");
+    assert!(resp.get("error").is_none(), "得到 {resp}");
+
+    // 源目录消失（模拟把盘拔掉 / 换了机器）
+    std::fs::remove_dir_all(&src).unwrap();
+    assert!(!src.exists());
+
+    // 删除该对必须能保存
+    client.request(
+        41,
+        "config.save",
+        Some(serde_json::json!({ "config": { "copyThreads": 4, "pairs": [] } })),
+    );
+    let resp = client.recv_response_for(41, Duration::from_secs(10)).expect("删除应成功");
+    assert!(resp.get("error").is_none(), "旧记录挡住了删除: {resp}");
+    assert_eq!(
+        resp["result"]["config"]["pairs"].as_array().unwrap().len(),
+        0,
+        "得到 {resp}"
+    );
+
+    // 再来一次：旧记录还在配置里时，新增一个有效对也要能保存
+    let src2 = temp_dir("stale-src2");
+    let dst2 = temp_dir("stale-dst2");
+    std::fs::create_dir_all(&src).unwrap();
+    client.request(
+        42,
+        "config.save",
+        Some(serde_json::json!({
+            "config": { "copyThreads": 4, "pairs": [{
+                "id": "p-old2", "name": "旧备份2",
+                "source": src.display().to_string(),
+                "dest": dst.display().to_string(),
+                "enabled": true, "include": [], "exclude": [], "intervalMinutes": null
+            }] }
+        })),
+    );
+    let resp = client.recv_response_for(42, Duration::from_secs(10)).expect("重新写入旧对应成功");
+    assert!(resp.get("error").is_none(), "得到 {resp}");
+    std::fs::remove_dir_all(&src).unwrap();
+
+    client.request(
+        43,
+        "config.save",
+        Some(serde_json::json!({
+            "config": { "copyThreads": 4, "pairs": [{
+                "id": "p-old2", "name": "旧备份2",
+                "source": src.display().to_string(),
+                "dest": dst.display().to_string(),
+                "enabled": true, "include": [], "exclude": [], "intervalMinutes": null
+            }, {
+                "id": "p-new", "name": "新备份",
+                "source": src2.display().to_string(),
+                "dest": dst2.display().to_string(),
+                "enabled": true, "include": [], "exclude": [], "intervalMinutes": null
+            }] }
+        })),
+    );
+    let resp = client.recv_response_for(43, Duration::from_secs(10)).expect("新增应成功");
+    assert!(resp.get("error").is_none(), "旧记录挡住了新增: {resp}");
+    assert_eq!(
+        resp["result"]["config"]["pairs"].as_array().unwrap().len(),
+        2,
+        "得到 {resp}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dst);
+    let _ = std::fs::remove_dir_all(&src2);
+    let _ = std::fs::remove_dir_all(&dst2);
+}
+
+#[test]
 fn config_save_history_roundtrip() {
     let mut client = Client::spawn();
 

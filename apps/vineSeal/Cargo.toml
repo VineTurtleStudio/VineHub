@@ -1,0 +1,32 @@
+[package]
+name = "vine-seal"
+version.workspace = true
+edition.workspace = true
+description = "文件复制/移动 + 转移后哈希校验（极简单窗口，vineFerry 后继）"
+license.workspace = true
+
+[lib]
+name = "vine_seal"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vine-seal"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+rfd = { workspace = true }
+sha2 = { workspace = true }
+md-5 = { workspace = true }
+xxhash-rust = { workspace = true }
+crc32fast = { workspace = true }
+walkdir = { workspace = true }
+filetime = { workspace = true }
+windows-sys = { workspace = true }
+vine-plugin-api = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

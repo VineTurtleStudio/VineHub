@@ -1,0 +1,36 @@
+[package]
+name = "vine-ferry"
+version.workspace = true
+edition.workspace = true
+description = "文件复制/移动 + 转移后哈希校验（资源管理器式面板）"
+license.workspace = true
+
+[lib]
+name = "vine_ferry"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vine-ferry"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui_extras = { workspace = true }
+rfd = { workspace = true }
+sha2 = { workspace = true }
+md-5 = { workspace = true }
+xxhash-rust = { workspace = true }
+crc32fast = { workspace = true }
+walkdir = { workspace = true }
+filetime = { workspace = true }
+windows-sys = { workspace = true }
+trash = { workspace = true }
+rusqlite = { workspace = true }
+vine-plugin-api = { workspace = true }
+image = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

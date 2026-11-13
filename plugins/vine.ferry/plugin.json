@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "vine.ferry",
+  "name": "vineFerry",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "kind": "sidecar",
+  "entry": "../../target/debug/vine-ferry.exe",
+  "panels": [],
+  "commands": [
+    { "id": "transfer.start", "title": "开始转移" },
+    { "id": "verify.start", "title": "按清单校验" },
+    { "id": "history.list", "title": "历史记录" }
+  ],
+  "permissions": {
+    "fs.read": ["user-picked"],
+    "fs.write": ["user-picked"],
+    "net": false,
+    "exec": false
+  },
+  "dataDir": "data",
+  "minHubVersion": "0.1.0"
+}

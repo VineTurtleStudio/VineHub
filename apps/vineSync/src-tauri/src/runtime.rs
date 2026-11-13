@@ -172,19 +172,25 @@ pub fn preview(app: &tauri::AppHandle, pair_id: Option<String>) -> Result<Previe
             dto.errors.push(crate::msg::err_pair_source_missing(&pair.name));
             continue;
         }
+        // 目标目录可写性预检：只读/受限目录在预览阶段就报出来，
+        // 不让用户白等一整轮扫描后在每个文件上看到「拒绝访问 (os error 5)」
+        if let Err(e) = copy::probe_writable(Path::new(&pair.dest)) {
+            dto.errors.push(format!(
+                "{}{}{e}",
+                pair.name,
+                crate::msg::pair_err_sep()
+            ));
+            continue;
+        }
         if crate::model::dest_root_unsafe(pair) {
             dto.errors.push(crate::msg::err_pair_dest_root(&pair.name));
             continue;
         }
         match compute_changes(Some(app), pair, &config) {
-            Ok((_src, _dst, d, skipped)) => {
+            Ok((_src, _dst, d, notes)) => {
                 dto.suppressed += d.suppressed;
-                if skipped > 0 {
-                    dto.errors.push(crate::msg!(
-                        "扫描跳过 {skipped} 个不可访问路径",
-                        "Scan skipped {skipped} inaccessible path(s)"
-                    ));
-                }
+                // 被跳过/被合并的路径直接列在预览错误里，避免「文件莫名没备份」
+                dto.errors.extend(notes.messages());
                 for ch in &d.changes {
                     match ch.kind {
                         ChangeKind::Add => dto.counts.added += 1,
@@ -290,7 +296,14 @@ fn run_sync(app: &tauri::AppHandle, ids: &[String], trigger: &str) {
             run_errors.push(msg);
             continue;
         }
-        let _ = std::fs::create_dir_all(&pair.dest);
+        // 目标目录必须可建可写：失败要立刻记失败并给出准确目录，
+        // 否则后续每个文件都会各报一次「拒绝访问 (os error 5)」
+        if let Err(e) = copy::ensure_dir(Path::new(&pair.dest)) {
+            ok = false;
+            record_result(app, pair, &started_at, "failed", &Counts::default(), trigger, &e, true);
+            run_errors.push(format!("{}{}{e}", pair.name, crate::msg::pair_err_sep()));
+            continue;
+        }
 
         match sync_pair(app, pair, &config, &started_at, trigger, force_log) {
             Ok(outcome) => {
@@ -418,7 +431,7 @@ fn sync_pair(
     trigger: &str,
     force_log: bool,
 ) -> Result<PairOutcome, String> {
-    let (src_map, _dst_map, d, skipped) = compute_changes(Some(app), pair, config)?;
+    let (src_map, _dst_map, d, notes) = compute_changes(Some(app), pair, config)?;
     let total = d.changes.len();
     let mut counts = Counts { skipped: d.suppressed, ..Counts::default() };
     let mut errors: Vec<String> = Vec::new();
@@ -454,10 +467,24 @@ fn sync_pair(
     counts.failed += applied.failed;
     errors.extend(errs);
 
-    if skipped > 0 {
+    // 目标端内容已变：哈希摘要缓存立即失效，避免后续比对用到旧摘要
+    crate::core::clear_hash_cache();
+
+    // 扫描阶段被跳过的路径必须能定位：只报一个数字无法排查「文件遗漏」
+    errors.extend(notes.messages());
+
+    // 对账：计划的新增/更新若既没成功也没失败，说明有变更被丢弃（内部缺陷兜底）
+    let planned_io = d
+        .changes
+        .iter()
+        .filter(|c| matches!(c.kind, ChangeKind::Add | ChangeKind::Update))
+        .count();
+    let done_io = (applied.added + applied.updated + applied.failed) as usize;
+    if planned_io > done_io {
+        let lost = planned_io - done_io;
         errors.push(crate::msg!(
-            "扫描跳过 {skipped} 个不可访问路径",
-            "Scan skipped {skipped} inaccessible path(s)"
+            "内部校验：计划 {planned_io} 项新增/更新，实际只处理 {done_io} 项（{lost} 项未执行，请反馈此日志）",
+            "Internal check: {planned_io} add/update planned but only {done_io} handled ({lost} dropped; please report this log)"
         ));
     }
 
@@ -535,7 +562,8 @@ pub(crate) fn compute_changes(
         _ => false,
     };
 
-    let (mut dst_map, dst_skipped) = match (fast_scan, app) {
+    let mut dst_out = scan::ScanOutput::default();
+    let mut dst_map = match (fast_scan, app) {
         (true, Some(a)) => {
             let ctx = a.state::<AppCtx>();
             let snap = ctx
@@ -544,14 +572,14 @@ pub(crate) fn compute_changes(
                 .unwrap_or_else(|e| e.into_inner())
                 .load_file_state(&pair.id)?;
             emit_scan(app, pair, "target", snap.len() as u64, "");
-            (snap, 0usize)
+            snap
         }
         _ => {
             // 目标端扫描（清理临时文件）
             let mut dst_files = 0u64;
             let mut dst_last = Instant::now() - Duration::from_millis(250);
             let mut dst_last_rel = String::new();
-            let dst_out = scan::scan_with_progress(&dst_root, &filter, true, |rel| {
+            let scanned = scan::scan_with_progress(&dst_root, &filter, true, |rel| {
                 dst_files += 1;
                 dst_last_rel.clear();
                 dst_last_rel.push_str(rel);
@@ -561,28 +589,148 @@ pub(crate) fn compute_changes(
                 }
             })?;
             emit_scan(app, pair, "target", dst_files, &dst_last_rel);
-            (dst_out.files, dst_out.skipped.len())
+            dst_out = scanned;
+            std::mem::take(&mut dst_out.files)
         }
     };
 
+    // 扫描阶段的「被跳过」信息必须可定位：只给数字无法排查文件遗漏
+    let notes = ScanNotes {
+        skipped: src_out.skipped.len() + dst_out.skipped.len(),
+        skipped_samples: src_out
+            .skipped
+            .iter()
+            .chain(dst_out.skipped.iter())
+            .take(5)
+            .cloned()
+            .collect(),
+        symlinks: src_out.symlinks,
+        case_collisions: src_out.case_collisions.clone(),
+    };
+
     // 源端不可见的路径同步从目标清单剔除，避免被误判为“已删除”而清理副本
-    let skipped = src_out.skipped.len() + dst_skipped;
     scan::prune_under(&mut dst_map, &src_out.skipped);
     let src_map = src_out.files;
+
+    // 哈希校验：只对「大小与 mtime 都相同」的候选并行比对，结果交给 diff
+    let hash_differs = if config.hash_verify {
+        hash_compare(
+            app,
+            pair,
+            &src_map,
+            &dst_map,
+            &src_root,
+            &dst_root,
+            config.copy_threads.clamp(1, 16) as usize,
+        )
+    } else {
+        std::collections::HashSet::new()
+    };
 
     let d = diff(
         &src_map,
         &dst_map,
         config.delete_policy,
         config.version_on_delete,
-        config.hash_verify,
-        &src_root,
-        &dst_root,
+        &hash_differs,
     );
-    Ok((src_map, dst_map, d, skipped))
+    Ok((src_map, dst_map, d, notes))
+}
+
+/// 哈希校验阶段：对候选（大小+mtime 相同）文件并行比对两端 SHA-256。
+///
+/// 旧实现把哈希放在 `diff` 里逐文件串行执行，且不上报任何进度：几十万文件的
+/// 备份盘上，界面会长时间停在最后一次扫描路径上，看起来就是「卡住」。这里按
+/// 复制线程数分片并行，并每 200ms 上报 `phase = "hash"` 的进度。
+fn hash_compare(
+    app: Option<&tauri::AppHandle>,
+    pair: &PairConfig,
+    src_map: &BTreeMap<String, FileMeta>,
+    dst_map: &BTreeMap<String, FileMeta>,
+    src_root: &Path,
+    dst_root: &Path,
+    threads: usize,
+) -> std::collections::HashSet<String> {
+    let candidates: Vec<(&String, &FileMeta, &FileMeta)> = src_map
+        .iter()
+        .filter_map(|(key, s)| {
+            dst_map
+                .get(key)
+                .filter(|d| s.size == d.size && s.mtime_ns == d.mtime_ns)
+                .map(|d| (key, s, d))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return std::collections::HashSet::new();
+    }
+
+    let total = candidates.len();
+    let shards = threads.clamp(1, 16).min(total);
+    let chunk = total.div_ceil(shards);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let differs: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let last_emit = Mutex::new(Instant::now() - Duration::from_millis(200));
+
+    std::thread::scope(|s| {
+        for shard in candidates.chunks(chunk) {
+            let done = &done;
+            let differs = &differs;
+            let last_emit = &last_emit;
+            s.spawn(move || {
+                for (key, sm, dm) in shard {
+                    let equal = match (
+                        crate::core::file_digest_cached(
+                            &src_root.join(&sm.rel),
+                            sm.size,
+                            sm.mtime_ns,
+                        ),
+                        crate::core::file_digest_cached(
+                            &dst_root.join(&dm.rel),
+                            dm.size,
+                            dm.mtime_ns,
+                        ),
+                    ) {
+                        (Ok(a), Ok(b)) => a == b,
+                        // 任一端读不了：按「内容不同」处理（进入更新，失败会进失败计数）
+                        _ => false,
+                    };
+                    if !equal {
+                        differs.lock().unwrap_or_else(|e| e.into_inner()).push((*key).clone());
+                    }
+
+                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    let emit = n == total || {
+                        let mut slot = last_emit.lock().unwrap_or_else(|e| e.into_inner());
+                        if slot.elapsed() >= Duration::from_millis(200) {
+                            *slot = Instant::now();
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if emit {
+                        emit_scan_full(app, pair, "hash", n as u64, total as u64, &sm.rel);
+                    }
+                }
+            });
+        }
+    });
+
+    differs.into_inner().unwrap_or_else(|e| e.into_inner()).into_iter().collect()
 }
 
 fn emit_scan(app: Option<&tauri::AppHandle>, pair: &PairConfig, phase: &str, files: u64, rel: &str) {
+    emit_scan_full(app, pair, phase, files, 0, rel);
+}
+
+fn emit_scan_full(
+    app: Option<&tauri::AppHandle>,
+    pair: &PairConfig,
+    phase: &str,
+    files: u64,
+    total: u64,
+    rel: &str,
+) {
     if let Some(app) = app {
         let _ = app.emit(
             "scan-progress",
@@ -590,19 +738,64 @@ fn emit_scan(app: Option<&tauri::AppHandle>, pair: &PairConfig, phase: &str, fil
                 pair_name: pair.name.clone(),
                 phase: phase.to_string(),
                 files,
+                total,
                 rel_path: rel.to_string(),
             },
         );
     }
 }
 
-/// (源清单, 目标清单(已剔除源端不可见路径), 差异, 扫描跳过的不可访问路径数)
+/// (源清单, 目标清单(已剔除源端不可见路径), 差异, 扫描阶段的可解释信息)
 pub(crate) type DiffResult3 = (
     BTreeMap<String, FileMeta>,
     BTreeMap<String, FileMeta>,
     DiffResult,
-    usize,
+    ScanNotes,
 );
+
+/// 扫描阶段「被跳过 / 被合并」的路径统计（供日志与预览说明遗漏风险）
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ScanNotes {
+    pub(crate) skipped: usize,
+    skipped_samples: Vec<String>,
+    pub(crate) symlinks: usize,
+    case_collisions: Vec<String>,
+}
+
+impl ScanNotes {
+    /// 生成可直接展示的说明；无跳过时返回空
+    pub(crate) fn messages(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.skipped > 0 {
+            let n = self.skipped;
+            let sample = if self.skipped_samples.is_empty() {
+                String::new()
+            } else {
+                format!("（{}）", self.skipped_samples.join("、"))
+            };
+            out.push(crate::msg!(
+                "扫描跳过 {n} 个不可访问路径{sample}，这些路径的内容不会进入备份",
+                "Scan skipped {n} inaccessible path(s){sample}; their contents are not backed up"
+            ));
+        }
+        if self.symlinks > 0 {
+            let n = self.symlinks;
+            out.push(crate::msg!(
+                "跳过 {n} 个符号链接/目录联接（默认不跟随，链接目标中的文件不会进入备份）",
+                "Skipped {n} symlink/junction(s) (not followed; their targets are not backed up)"
+            ));
+        }
+        if !self.case_collisions.is_empty() {
+            let n = self.case_collisions.len();
+            let sample = self.case_collisions.join("、");
+            out.push(crate::msg!(
+                "{n} 组路径仅大小写不同，目标卷上无法共存，已保留其一：{sample}",
+                "{n} path(s) differ only in case and cannot coexist on the destination; kept the first: {sample}"
+            ));
+        }
+        out
+    }
+}
 
 fn apply_change(pair: &PairConfig, ch: &Change, config: &Config) -> Result<(), String> {
     let src_root = crate::core::to_long_path(Path::new(&pair.source));
@@ -943,6 +1136,71 @@ mod tests {
             src_rel: Some(rel.to_string()),
             dst_rel: None,
         }
+    }
+
+    #[test]
+    fn hash_compare_only_flags_content_differences() {
+        // 同尺寸、同 mtime：只有内容不同才会被哈希阶段标记
+        let (src, dst, pair) = tmp_pair("hashcmp");
+        let mut maps: (BTreeMap<String, FileMeta>, BTreeMap<String, FileMeta>) =
+            (BTreeMap::new(), BTreeMap::new());
+        for i in 0..40 {
+            let name = format!("f{i:02}.bin");
+            let body = format!("{:04}", i); // 4 字节定长，便于制造同尺寸
+            std::fs::write(src.join(&name), &body).unwrap();
+            let dst_body = if i % 20 == 7 { "XXXX".to_string() } else { body.clone() };
+            std::fs::write(dst.join(&name), dst_body).unwrap();
+            let mtime = std::fs::metadata(src.join(&name)).unwrap().modified().unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(dst.join(&name))
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+            let md = std::fs::metadata(src.join(&name)).unwrap();
+            let meta = FileMeta {
+                rel: name.clone(),
+                size: md.len(),
+                mtime_ns: crate::core::systemtime_to_ns(md.modified().unwrap()),
+            };
+            maps.0.insert(crate::core::normalize_key(&name), meta.clone());
+            maps.1.insert(
+                crate::core::normalize_key(&name),
+                FileMeta { rel: name, ..meta },
+            );
+        }
+
+        let differs = hash_compare(None, &pair, &maps.0, &maps.1, &src, &dst, 4);
+        let mut got: Vec<String> = differs.into_iter().collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["f07.bin".to_string(), "f27.bin".to_string()],
+            "只有内容被改的条目应进入差异集合"
+        );
+
+        // 哈希阶段不改动磁盘
+        assert_eq!(fs_read(&dst.join("f07.bin")), "XXXX");
+    }
+
+    #[test]
+    fn hash_compare_skips_entries_with_different_size() {
+        // 大小/时间已能判定的条目不会进入哈希候选（避免无谓读盘）
+        let (src, dst, pair) = tmp_pair("hashskip");
+        std::fs::write(src.join("a.bin"), "AAAA").unwrap();
+        std::fs::write(dst.join("a.bin"), "AAAAAA").unwrap();
+        let md = std::fs::metadata(src.join("a.bin")).unwrap();
+        let meta = FileMeta {
+            rel: "a.bin".into(),
+            size: md.len(),
+            mtime_ns: crate::core::systemtime_to_ns(md.modified().unwrap()),
+        };
+        let mut src_map = BTreeMap::new();
+        src_map.insert("a.bin".to_string(), meta.clone());
+        let mut dst_map = BTreeMap::new();
+        dst_map.insert("a.bin".to_string(), FileMeta { size: 9, ..meta });
+        let differs = hash_compare(None, &pair, &src_map, &dst_map, &src, &dst, 4);
+        assert!(differs.is_empty(), "尺寸不同不该进哈希候选");
     }
 
     #[test]

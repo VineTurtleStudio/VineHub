@@ -324,7 +324,7 @@ fn handle_sync_preview(
         );
 
         let terminal = match runtime::compute_changes(None, &pair, &config) {
-            Ok((_src, _dst, d, skipped)) => {
+            Ok((_src, _dst, d, notes)) => {
                 let mut counts = Counts::default();
                 let mut total_bytes = 0u64;
                 let mut changes = Vec::new();
@@ -352,7 +352,8 @@ fn handle_sync_preview(
                     "counts": counts_json(&counts),
                     "totalBytes": total_bytes,
                     "suppressed": d.suppressed,
-                    "skipped": skipped,
+                    "skipped": notes.skipped,
+                    "scanNotes": notes.messages(),
                     "truncated": d.changes.len() > 1000,
                     "changeCount": d.changes.len(),
                     "changes": changes,
@@ -410,7 +411,7 @@ fn handle_sync_start(
         );
 
         let terminal = (|| {
-            let (_src, _dst, d, _skipped) = runtime::compute_changes(None, &pair, &config)?;
+            let (_src, _dst, d, _notes) = runtime::compute_changes(None, &pair, &config)?;
             let total = d.changes.len();
             state.send_notification(
                 method::TASK_PROGRESS,
@@ -503,7 +504,9 @@ fn handle_config_save(state: &Arc<RpcState>, id: RequestId, params: Option<Value
     for p in &mut config.pairs {
         crate::commands::normalize_pair(p);
     }
-    if let Err(e) = crate::commands::validate_config(&config) {
+    // 传旧配置：旧记录（如换盘后源目录已不存在）不应阻挡删除/新增其它文件夹对
+    let previous = state.load_config();
+    if let Err(e) = crate::commands::validate_config_with_previous(&config, Some(&previous)) {
         return invalid_params(id, e);
     }
     let path = state.app_dir.join("config.json");

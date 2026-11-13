@@ -435,9 +435,16 @@ function AppShell() {
                     {t("scanScanning")} · {scan.pairName}
                   </strong>
                   <span className="progress-text">
-                    {scan.phase === "source" ? t("scanSource") : t("scanTarget")} ·{" "}
-                    {t("scanFmt", { n: scan.files })}
-                    {scanRate > 0 && <> · {Math.round(scanRate)}/s</>}
+                    {scan.phase === "source"
+                      ? t("scanSource")
+                      : scan.phase === "target"
+                        ? t("scanTarget")
+                        : t("scanHash")}{" "}
+                    ·{" "}
+                    {scan.total > 0
+                      ? `${scan.files} / ${scan.total}`
+                      : t("scanFmt", { n: scan.files })}
+                    {scan.phase !== "hash" && scanRate > 0 && <> · {Math.round(scanRate)}/s</>}
                   </span>
                   <span className="progress-file">{scan.relPath}</span>
                 </div>

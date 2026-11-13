@@ -13,11 +13,21 @@ pub struct ScanOutput {
     /// 因权限不足/扫描期间被移除等原因跳过的子树根或文件（已规范化），
     /// 供目标端剔除对应副本，避免被误判为“已删除”
     pub skipped: Vec<String>,
+    /// 跳过的符号链接 / 目录联接数量（不跟随，其中的文件不会进入备份）
+    pub symlinks: usize,
+    /// 规范化 key 冲突（仅大小写不同的两个路径）样本：
+    /// 在大小写不敏感的目标卷上无法共存，只能保留其一
+    pub case_collisions: Vec<String>,
 }
 
 impl Default for ScanOutput {
     fn default() -> Self {
-        Self { files: BTreeMap::new(), skipped: Vec::new() }
+        Self {
+            files: BTreeMap::new(),
+            skipped: Vec::new(),
+            symlinks: 0,
+            case_collisions: Vec::new(),
+        }
     }
 }
 
@@ -48,6 +58,8 @@ pub fn scan_with_progress(
     if !root.exists() {
         return Ok(out);
     }
+    // filter_entry 是闭包，用 Cell 统计既不借走 out，也能在结束后汇总
+    let symlinks = std::cell::Cell::new(0usize);
 
     let iter = WalkDir::new(root)
         .follow_links(false)
@@ -59,6 +71,7 @@ pub fn scan_with_progress(
             // 均返回 is_symlink()==true（实测含 DIRECTORY 属性的 junction 亦然），
             // 只有此一项检查即可防止外部目录树/循环联接被纳入备份。
             if ft.is_symlink() {
+                symlinks.set(symlinks.get() + 1);
                 return false;
             }
             // 文件在主循环里过滤（连同 rel_of 一起做），避免每文件重复计算相对路径
@@ -66,6 +79,12 @@ pub fn scan_with_progress(
                 return true;
             }
             let path = entry.path();
+            // 目标端扫描：上次中断留下的 `<文件>.vinesync.tmp` 目录是垃圾，
+            // 不进清单（否则会被当成源端已删除而清理，或挡住同名文件的复制）。
+            if clean_temp && path.file_name().is_some_and(|n| n.to_string_lossy().ends_with(TEMP_SUFFIX)) {
+                let _ = std::fs::remove_dir_all(path);
+                return false;
+            }
             let rel = match rel_of(root, path) {
                 Some(r) => r,
                 None => return false,
@@ -122,7 +141,18 @@ pub fn scan_with_progress(
         };
         let mtime_ns = md.modified().map(systemtime_to_ns).unwrap_or(0);
         on_file(&rel);
-        out.files.insert(normalize_key(&rel), FileMeta { rel, size: md.len(), mtime_ns });
+        let key = normalize_key(&rel);
+        // 仅大小写不同的两个路径在目标卷上无法共存：保留第一个，并记录样本
+        if let Some(prev) = out.files.get(&key) {
+            if prev.rel != rel {
+                if out.case_collisions.len() < 20 {
+                    out.case_collisions.push(format!("{} ↔ {}", prev.rel, rel));
+                }
+                continue;
+            }
+        }
+        out.files.insert(key, FileMeta { rel, size: md.len(), mtime_ns });
     }
+    out.symlinks = symlinks.get();
     Ok(out)
 }

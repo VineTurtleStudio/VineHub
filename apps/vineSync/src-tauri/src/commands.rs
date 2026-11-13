@@ -32,9 +32,41 @@ pub(crate) fn normalize_pair(pair: &mut crate::model::PairConfig) {
         .collect();
 }
 
-pub(crate) fn validate_config(config: &Config) -> Result<(), String> {
+/// 文件夹对逐字段是否与旧配置完全一致（含 id）。
+/// 目的：旧配置原样保留的条目不再重新校验，避免「移动磁盘/换盘符后
+/// 旧记录让整份配置存不下去」——删不掉旧对，也建不了新对。
+fn pair_unchanged(prev: &crate::model::PairConfig, cur: &crate::model::PairConfig) -> bool {
+    prev.id == cur.id
+        && prev.name == cur.name
+        && prev.source == cur.source
+        && prev.dest == cur.dest
+        && prev.enabled == cur.enabled
+        && prev.include == cur.include
+        && prev.exclude == cur.exclude
+        && prev.interval_minutes == cur.interval_minutes
+}
+
+/// 保存前校验。`previous` 为已落盘的旧配置：
+/// - 旧配置中逐字段未变的文件夹对跳过逐项校验（仅占位，保存其它改动时不受它阻挡）
+/// - 新增 / 改过的文件夹对照常校验；仅当「源路径本身被改过」时才要求目录存在
+///   （改个名字不该因为盘没插上就被拒）
+pub(crate) fn validate_config_with_previous(
+    config: &Config,
+    previous: Option<&Config>,
+) -> Result<(), String> {
     let mut ids: Vec<String> = Vec::new();
     for p in &config.pairs {
+        let prev_same = previous
+            .and_then(|prev| prev.pairs.iter().find(|q| q.id == p.id))
+            .filter(|q| pair_unchanged(q, p));
+        if prev_same.is_some() {
+            ids.push(p.id.clone());
+            continue;
+        }
+        let source_touched = previous
+            .and_then(|prev| prev.pairs.iter().find(|q| q.id == p.id))
+            .map(|q| q.source != p.source)
+            .unwrap_or(true);
         let name = if p.name.is_empty() {
             crate::msg::unnamed_pair().to_string()
         } else {
@@ -47,7 +79,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<(), String> {
         if p.dest.is_empty() {
             return Err(crate::msg!("「{name}」未选择目标目录", "'{name}' destination directory not selected"));
         }
-        if !Path::new(&p.source).is_dir() {
+        if source_touched && !Path::new(&p.source).is_dir() {
             return Err(crate::msg!(
                 "「{name}」源目录不存在: {src}",
                 "'{name}' source directory not found: {src}"
@@ -286,7 +318,13 @@ pub async fn save_config(app: tauri::AppHandle, config: Config) -> Result<StateD
     }
     // 校验提示使用新语言；设置立即生效于本进程消息与开机自启动
     crate::msg::set(config.language);
-    validate_config(&config)?;
+    let prev_config = app
+        .state::<AppCtx>()
+        .config
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    validate_config_with_previous(&config, Some(&prev_config))?;
 
     let config_path = app.state::<AppCtx>().config_path.clone();
     let prev_autostart;
@@ -360,6 +398,67 @@ pub fn cleanup_versions(app: tauri::AppHandle, request: CleanupRequest) -> Resul
 mod tests {
     use super::*;
     use crate::model::{Config, PairConfig};
+
+    /// 无旧配置时的整份校验（测试辅助，等价于首次保存）
+    fn validate_config(config: &Config) -> Result<(), String> {
+        validate_config_with_previous(config, None)
+    }
+
+    /// 移动磁盘/换盘后旧记录源目录已不存在：删除旧对、新增新对都必须能保存
+    #[test]
+    fn stale_pair_does_not_block_delete_or_add() {
+        let live = std::env::temp_dir();
+        let live = live.to_string_lossy().to_string();
+        let stale = PairConfig {
+            id: "stale".into(),
+            name: "旧备份".into(),
+            source: "Z:\\已拔掉的盘\\资料".into(),
+            dest: "Z:\\备份".into(),
+            ..Default::default()
+        };
+        let prev = Config { pairs: vec![stale.clone()], ..Config::default() };
+
+        // 源目录不存在 → 首次保存（新对）时仍会被拒
+        let fresh = Config { pairs: vec![stale.clone()], ..Config::default() };
+        assert!(validate_config(&fresh).is_err(), "新增无效源目录应被拒");
+
+        // 旧记录原样保留：删除另一个对 / 新增有效对都能保存
+        let only_new = Config {
+            pairs: vec![PairConfig {
+                id: "new".into(),
+                name: "新备份".into(),
+                source: live.clone(),
+                dest: "C:\\vinesync-test-dst".into(),
+                ..Default::default()
+            }],
+            ..Config::default()
+        };
+        assert!(
+            validate_config_with_previous(&only_new, Some(&prev)).is_ok(),
+            "删除旧对（同时新增有效对）不应被旧记录阻挡"
+        );
+        assert!(validate_config_with_previous(&Config::default(), Some(&prev)).is_ok());
+
+        // 旧记录本身被改动（改名不算改路径）→ 不再因为盘不在而拒绝
+        let renamed = Config {
+            pairs: vec![PairConfig { name: "旧备份改名".into(), ..stale.clone() }],
+            ..Config::default()
+        };
+        assert!(
+            validate_config_with_previous(&renamed, Some(&prev)).is_ok(),
+            "只改名不应因源目录不存在被拒"
+        );
+
+        // 旧记录被改指向新路径且路径不可用 → 拒绝（用户刚选的目录应当存在）
+        let retarget = Config {
+            pairs: vec![PairConfig { source: "Y:\\不存在\\资料".into(), ..stale.clone() }],
+            ..Config::default()
+        };
+        assert!(
+            validate_config_with_previous(&retarget, Some(&prev)).is_err(),
+            "改指向不存在的目录应被拒"
+        );
+    }
 
     #[test]
     fn dest_drive_root_rejected_unless_source_is_drive_root() {

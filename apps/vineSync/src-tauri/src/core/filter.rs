@@ -119,7 +119,7 @@ mod tests {
         copy, diff, normalize_key, normalize_path_str, scan, version, ChangeKind,
         DeletePolicy, FileMeta,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
@@ -445,25 +445,25 @@ mod tests {
         .map(|(k, v)| (normalize_key(k), v.clone()))
         .collect();
 
-        let roots = (Path::new("/s"), Path::new("/d"));
+        let none: HashSet<String> = HashSet::new();
 
-        let m = diff(&src, &dst, DeletePolicy::Mirror, true, false, roots.0, roots.1);
+        let m = diff(&src, &dst, DeletePolicy::Mirror, true, &none);
         assert_eq!(m.changes.len(), 3);
         assert!(m.changes.iter().any(|c| c.kind == ChangeKind::Add && c.rel == "a.txt"));
         assert!(m.changes.iter().any(|c| c.kind == ChangeKind::Update && c.rel == "b.txt"));
         assert!(m.changes.iter().any(|c| c.kind == ChangeKind::Delete && c.rel == "d.txt"));
         assert_eq!(m.suppressed, 0);
 
-        let v = diff(&src, &dst, DeletePolicy::Versioned, true, false, roots.0, roots.1);
+        let v = diff(&src, &dst, DeletePolicy::Versioned, true, &none);
         assert_eq!(v.changes.len(), 3);
         assert!(v.changes.iter().any(|c| c.kind == ChangeKind::Versioned && c.rel == "d.txt"));
 
         // 关闭「删除时备份」：策略 A 的源删除退化为直接删除
-        let v2 = diff(&src, &dst, DeletePolicy::Versioned, false, false, roots.0, roots.1);
+        let v2 = diff(&src, &dst, DeletePolicy::Versioned, false, &none);
         assert!(v2.changes.iter().any(|c| c.kind == ChangeKind::Delete && c.rel == "d.txt"));
         assert!(!v2.changes.iter().any(|c| c.kind == ChangeKind::Versioned));
 
-        let a = diff(&src, &dst, DeletePolicy::AddOnly, true, false, roots.0, roots.1);
+        let a = diff(&src, &dst, DeletePolicy::AddOnly, true, &none);
         assert_eq!(a.changes.len(), 2);
         assert!(!a.changes.iter().any(|c| c.kind == ChangeKind::Delete));
         assert_eq!(a.suppressed, 1);

@@ -141,11 +141,13 @@ export interface FinishedEvt {
   message: string;
 }
 
-/** 扫描进度（预览与同步的目录扫描阶段） */
+/** 扫描 / 哈希校验进度 */
 export interface ScanProgressEvt {
   pairName: string;
-  phase: "source" | "target";
+  phase: "source" | "target" | "hash";
   files: number;
+  /** 该阶段总量（0 = 未知，扫描阶段即如此） */
+  total: number;
   relPath: string;
 }
 

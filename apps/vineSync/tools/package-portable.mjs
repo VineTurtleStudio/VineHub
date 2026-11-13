@@ -13,60 +13,53 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const version = pkg.version;
 
-const exeSrc = path.join(root, "src-tauri", "target", "release", "vinesync.exe");
+// release exe 的位置随构建方式不同：
+//  - 独立仓库（未并入 workspace）：src-tauri/target/release
+//  - 作为 VineHub workspace 成员（本仓库现状）：产物落在 workspace 根 target/release
+const exeName = process.platform === "win32" ? "vinesync.exe" : "vinesync";
+const exeCandidates = [
+  path.join(root, "src-tauri", "target", "release", exeName),
+  path.join(root, "..", "..", "target", "release", exeName),
+];
+const exeSrc = exeCandidates.find((p) => fs.existsSync(p));
 const outDir = path.join(root, "dist-portable");
 const stageName = "vinesync-portable";
-const stageDir = path.join(outDir, stageName);
 const zipPath = path.join(outDir, `vinesync-portable-v${version}.zip`);
 
-if (!fs.existsSync(exeSrc)) {
-  console.error(`未找到 ${exeSrc}\n请先执行: npm run tauri build`);
-  process.exit(1);
-}
-
-// 正在从 dist-portable 运行的实例 → 拒绝打包（打包会删除该目录）
-function runningFrom(dir) {
-  try {
-    const out = execFileSync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-Command",
-        "(Get-Process vinesync -EA SilentlyContinue).Path -join \"`n\"",
-      ],
-      { encoding: "utf8" },
-    );
-    const lowerDir = path.resolve(dir).toLowerCase() + path.sep;
-    return out
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .some((p) => path.resolve(p).toLowerCase().startsWith(lowerDir));
-  } catch {
-    return false; // 探测失败不阻塞打包
-  }
-}
-if (fs.existsSync(outDir) && runningFrom(outDir)) {
+if (!exeSrc) {
   console.error(
-    "拒绝打包：dist-portable 下的 vinesync.exe 正在运行。\n" +
-      "请先退出 vineSync，再执行 npm run package:portable（不会强制结束你的程序）。",
+    `未找到 release 可执行文件，已查找:\n  ${exeCandidates.join("\n  ")}\n请先执行: npm run tauri build`,
   );
   process.exit(1);
 }
 
-// 保留旧的 portable_data（用户可能把这个目录当便携安装在用）
-let savedData = null;
-const oldData = path.join(stageDir, "portable_data");
-if (fs.existsSync(oldData)) {
-  savedData = fs.mkdtempSync(path.join(os.tmpdir(), "vinesync-pdata-"));
-  fs.cpSync(oldData, path.join(savedData, "portable_data"), { recursive: true });
-}
-
-// 只清自己的舞台目录，绝不删除 dist-portable 下的其他内容
-// （用户可能把解压出来的便携版放在 dist-portable 里使用，内含数据）
-fs.rmSync(stageDir, { recursive: true, force: true });
+// 非破坏式打包：在系统临时目录组装压缩内容，只产出 zip。
+// 绝不重建/删除 dist-portable 下已有的解压目录——用户可能正从那里运行，
+// 其 portable_data 里是真实配置与 SQLite 状态。旧实现会先删掉该目录再重建，
+// 一旦「运行中」保护探测失效（如受限终端里探测失败）就会动到用户数据。
+const stageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vinesync-stage-"));
+const stageDir = path.join(stageRoot, stageName); // zip 内的根目录名固定为 vinesync-portable
 fs.mkdirSync(stageDir, { recursive: true });
+const portableDir = path.join(outDir, stageName);
 
 fs.copyFileSync(exeSrc, path.join(stageDir, "vinesync.exe"));
+
+// Windows 完整性级别：exe 会继承所在目录的强制完整性标签。若构建目录被标成
+// 「低完整性」（CI/沙盒里常见），产出的 exe 运行后无法写入普通位置，所有复制
+// 都会失败为「拒绝访问 (os error 5)」，且与目标目录的 ACL 无关。打包时显式
+// 改为中完整性，保证便携版在任何目录都能写目标盘。
+if (process.platform === "win32") {
+  const stagedExe = path.join(stageDir, "vinesync.exe");
+  try {
+    execFileSync("icacls", [stagedExe, "/setintegritylevel", "Medium"], { stdio: "ignore" });
+  } catch {
+    console.warn(
+      "警告: 未能把 exe 的完整性级别设为 Medium。若运行后目标盘写入报「拒绝访问」，请执行:\n" +
+        `  icacls "${stagedExe}" /setintegritylevel Medium`,
+    );
+  }
+}
+
 fs.writeFileSync(
   path.join(stageDir, "vinesync.portable"),
   "vineSync portable mode marker. Delete this file to store data in the user profile instead.\r\n",
@@ -117,16 +110,33 @@ execFileSync(
   { stdio: "inherit" },
 );
 
-// zip 已生成（不含 portable_data），把用户数据放回目录（zip 保持干净）
-if (savedData) {
-  fs.cpSync(path.join(savedData, "portable_data"), oldData, { recursive: true });
-  fs.rmSync(savedData, { recursive: true, force: true });
-}
+// 临时舞台用完即删（zip 里不含任何用户数据）
+fs.rmSync(stageRoot, { recursive: true, force: true });
 
 const mb = (fs.statSync(zipPath).size / 1024 / 1024).toFixed(2);
 console.log(`\n便携版打包完成:`);
-console.log(`  目录: ${stageDir}`);
 console.log(`  压缩: ${zipPath} (${mb} MiB)`);
-if (fs.existsSync(oldData)) {
-  console.log(`  已保留原有 portable_data（未打包进 zip，未被删除）`);
+if (fs.existsSync(portableDir)) {
+  const running = (() => {
+    try {
+      const out = execFileSync(
+        "powershell.exe",
+        ["-NoProfile", "-Command", "(Get-Process vinesync -EA SilentlyContinue).Path -join \"`n\""],
+        { encoding: "utf8" },
+      );
+      const prefix = path.resolve(portableDir).toLowerCase() + path.sep;
+      return out
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .some((p) => path.resolve(p).toLowerCase().startsWith(prefix));
+    } catch {
+      return false;
+    }
+  })();
+  console.log(`  注意: ${portableDir} 已存在，未做任何改动（其 portable_data 原样保留）`);
+  console.log(
+    running
+      ? "        该目录下的 vinesync.exe 正在运行：退出后把新 zip 里的 vinesync.exe 覆盖进去即可（配置不用动）。"
+      : "        要用新版本：退出 vineSync 后把新 zip 里的 vinesync.exe 覆盖进该目录即可。",
+  );
 }

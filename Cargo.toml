@@ -10,6 +10,7 @@ members = [
     "apps/vineSync/src-tauri",
     "apps/vineCurator/src-tauri",
     "apps/VinePalmaCursor/src-tauri",
+    "apps/vineSeal",
 ]
 
 [workspace.package]
@@ -28,12 +29,22 @@ thiserror = "2"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tauri = { version = "2" }
 tauri-plugin-dialog = "2"
+sha2 = "0.10"
+md-5 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+crc32fast = "1"
+walkdir = "2"
+filetime = "0.2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+trash = "5"
+tempfile = "3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # vinePulse GUI（M3）
 eframe = "0.36"
 egui = "0.36"
 egui_extras = "0.36"
 rfd = "0.17"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 
 [profile.release]
 lto = "thin"

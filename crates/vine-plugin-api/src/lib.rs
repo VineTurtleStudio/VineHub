@@ -17,7 +17,8 @@ pub use manifest::{
 pub use rpc::{
     method, parse_request_line, parse_response_line, to_line, PluginInfo, RequestId, RpcError,
     RpcMessageError, RpcRequest, RpcResponse, ScanStartParams, ScanStartResult, TaskCancelParams,
-    TaskProgressParams,
+    TaskProgressParams, TransferStartParams, TransferStartResult, VerifyStartParams,
+    VerifyStartResult,
 };
 pub use version::{ApiVersion, VersionError};
 

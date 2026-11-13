@@ -330,9 +330,11 @@ pub struct FinishedEvt {
 #[serde(rename_all = "camelCase")]
 pub struct ScanProgressEvt {
     pub pair_name: String,
-    /// "source" | "target"
+    /// "source" | "target" | "hash"
     pub phase: String,
     pub files: u64,
+    /// 该阶段总量（0 = 未知，扫描阶段即如此）
+    pub total: u64,
     pub rel_path: String,
 }
 

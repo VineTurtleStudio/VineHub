@@ -17,6 +17,10 @@ pub mod method {
     pub const PING: &str = "ping";
     /// vinePulse 扫描启动。
     pub const SCAN_START: &str = "scan.start";
+    /// vineFerry 转移启动（复制/移动 + 哈希校验）。
+    pub const TRANSFER_START: &str = "transfer.start";
+    /// vineFerry 按清单事后校验启动。
+    pub const VERIFY_START: &str = "verify.start";
     /// vinePress 试算分类（不落盘）。
     pub const PLAN_START: &str = "plan.start";
     /// vinePress 查找重复文件。
@@ -432,6 +436,46 @@ pub struct ScanStartParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanStartResult {
+    pub task_id: String,
+}
+
+/// `transfer.start` 参数。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferStartParams {
+    /// 源文件/目录（可多项）。
+    pub sources: Vec<String>,
+    /// 目标目录。
+    pub dest: String,
+    /// "copy" 或 "move"（默认 copy）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+/// `transfer.start` 的即时 result（终态响应另带 RunSummary）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferStartResult {
+    pub task_id: String,
+}
+
+/// `verify.start` 参数。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyStartParams {
+    /// 清单文件路径（.sha256 / .sfv / .txt）。
+    pub manifest: String,
+    /// 校验基目录（清单内相对路径的根）。
+    pub base: String,
+    /// 哈希算法标签（sha256/xxh3/crc32/md5，默认从清单推断为 sha256）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub algo: Option<String>,
+}
+
+/// `verify.start` 的即时 result（终态响应另带逐项结果）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyStartResult {
     pub task_id: String,
 }
 

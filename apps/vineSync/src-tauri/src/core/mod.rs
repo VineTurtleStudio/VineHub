@@ -4,7 +4,7 @@ pub mod scan;
 pub mod version;
 
 use crate::model::{ChangeKind, DeletePolicy};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 /// 同步引擎内部使用的文件元数据
@@ -148,14 +148,14 @@ pub struct DiffResult {
 
 /// 对比源与目标快照，生成变更计划
 /// `version_on_delete`：删除策略 A 下源删除的文件是否移入版本备份（false = 直接删除）
+/// `hash_differs`：哈希校验阶段已判定「内容不同」的规范化 key 集合
+/// （大小与 mtime 都相同才进入哈希比对；比对本身由 runtime 并行执行）
 pub fn diff(
     src: &BTreeMap<String, FileMeta>,
     dst: &BTreeMap<String, FileMeta>,
     policy: DeletePolicy,
     version_on_delete: bool,
-    hash_verify: bool,
-    src_root: &Path,
-    dst_root: &Path,
+    hash_differs: &HashSet<String>,
 ) -> DiffResult {
     let mut out = DiffResult::default();
 
@@ -169,15 +169,9 @@ pub fn diff(
                 dst_rel: None,
             }),
             Some(d) => {
-                let mut need = s.size != d.size || s.mtime_ns != d.mtime_ns;
-                if !need && hash_verify {
-                    let hs = file_hash(&src_root.join(&s.rel));
-                    let hd = file_hash(&dst_root.join(&d.rel));
-                    need = match (hs, hd) {
-                        (Ok(a), Ok(b)) => a != b,
-                        _ => true,
-                    };
-                }
+                let need = s.size != d.size
+                    || s.mtime_ns != d.mtime_ns
+                    || hash_differs.contains(key);
                 if need {
                     out.changes.push(Change {
                         kind: ChangeKind::Update,
@@ -227,6 +221,20 @@ pub fn diff(
 
 /// 流式计算文件 SHA-256（十六进制）
 pub fn file_hash(path: &Path) -> E<String> {
+    Ok(hex(&file_digest(path)?))
+}
+
+fn hex(digest: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// 流式计算文件 SHA-256 原始摘要（32 字节，避免逐文件生成十六进制串）
+pub fn file_digest(path: &Path) -> E<[u8; 32]> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
@@ -243,7 +251,61 @@ pub fn file_hash(path: &Path) -> E<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher.finalize().into())
+}
+
+// ---------- 摘要缓存 ----------
+//
+// 「预览 → 用户确认 → 同步」是同一次同步的两个阶段，两阶段都会对大目录做
+// 哈希比对。没有缓存时每个文件要被读 4 遍（源/目标 × 2 阶段），几十万文件
+// 就是几十分钟纯 I/O。这里按 (路径, 大小, mtime) 缓存摘要，第二阶段直接命中；
+// 同步写入完成后再整体失效，保证下一次同步不会用到过期摘要。
+
+struct HashEntry {
+    size: u64,
+    mtime_ns: i64,
+    digest: [u8; 32],
+    at: std::time::Instant,
+}
+
+const HASH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+const HASH_CACHE_MAX: usize = 100_000;
+
+fn hash_cache() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, HashEntry>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, HashEntry>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 带缓存的摘要：`size`/`mtime_ns` 与缓存不一致或过期时重新计算。
+pub fn file_digest_cached(path: &Path, size: u64, mtime_ns: i64) -> E<[u8; 32]> {
+    let hit = {
+        let cache = hash_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache.get(path).and_then(|e| {
+            (e.size == size && e.mtime_ns == mtime_ns && e.at.elapsed() < HASH_CACHE_TTL)
+                .then_some(e.digest)
+        })
+    };
+    if let Some(d) = hit {
+        return Ok(d);
+    }
+    let digest = file_digest(path)?;
+    let mut cache = hash_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= HASH_CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(
+        path.to_path_buf(),
+        HashEntry { size, mtime_ns, digest, at: std::time::Instant::now() },
+    );
+    Ok(digest)
+}
+
+/// 同步写入后调用：目标内容已改变，缓存摘要立即失效
+pub fn clear_hash_cache() {
+    hash_cache().lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 #[cfg(test)]
