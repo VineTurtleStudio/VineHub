@@ -1,4 +1,4 @@
-# Rust
+﻿# Rust
 /target
 **/*.rs.bk
 
@@ -20,3 +20,7 @@ Thumbs.db
 
 # 测试临时数据
 .testdata
+
+# IDE / 本地打包产物
+.idea/
+apps/vineCurator/release/
