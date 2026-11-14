@@ -270,3 +270,10 @@ docs/            アーキテクチャとブリッジ仕様
 - **`cargo build` でリンクエラー** — VS Build Tools の C++ と Windows SDK をインストール
 - **`npm run tauri dev` で窓が出ない** — アプリのフォルダで `npm install`、Node ≥ 20 を確認
 - **1 つのツールだけ使いたい** — そのフォルダで直接起動すれば hub は不要
+---
+
+## 许可 / License
+
+本项目以 [MIT](./LICENSE) 许可证发布。
+
+Licensed under the [MIT License](./LICENSE).
